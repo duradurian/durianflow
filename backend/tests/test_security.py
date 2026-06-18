@@ -1,6 +1,12 @@
-import pytest
+import asyncio
 
+import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+
+from app import main as main_module
 from app.config import Settings
+from app.main import app, health, require_http_api_token, settings as app_settings
 from app.security import is_allowed_origin, is_loopback_host, validate_runtime_security
 
 
@@ -45,3 +51,51 @@ def test_remote_origin_requires_allowlist() -> None:
     assert not is_allowed_origin("https://example.com", settings)
     settings = Settings(_env_file=None, ALLOWED_ORIGINS="https://example.com")
     assert is_allowed_origin("https://example.com", settings)
+
+
+def test_server_mode_does_not_allow_local_origins_by_default() -> None:
+    settings = Settings(_env_file=None, ALLOWED_ORIGINS="")
+    assert not is_allowed_origin("file://", settings, allow_local_origins=False)
+    assert not is_allowed_origin("null", settings, allow_local_origins=False)
+
+
+def test_http_token_dependency_rejects_missing_token(monkeypatch) -> None:
+    monkeypatch.setattr(app_settings, "REQUIRE_API_TOKEN", True)
+    monkeypatch.setattr(app_settings, "API_TOKEN", "secret")
+    with pytest.raises(HTTPException):
+        require_http_api_token()
+
+
+def test_http_token_dependency_accepts_header_token(monkeypatch) -> None:
+    monkeypatch.setattr(app_settings, "REQUIRE_API_TOKEN", True)
+    monkeypatch.setattr(app_settings, "API_TOKEN", "secret")
+    require_http_api_token(x_api_token="secret")
+
+
+def test_http_token_dependency_accepts_bearer_token(monkeypatch) -> None:
+    monkeypatch.setattr(app_settings, "REQUIRE_API_TOKEN", True)
+    monkeypatch.setattr(app_settings, "API_TOKEN", "secret")
+    require_http_api_token(authorization="Bearer secret")
+
+
+def test_models_endpoint_requires_token_when_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(app_settings, "REQUIRE_API_TOKEN", True)
+    monkeypatch.setattr(app_settings, "API_TOKEN", "secret")
+    client = TestClient(app)
+
+    assert client.get("/v1/models").status_code == 401
+    assert client.get("/v1/models", headers={"x-api-token": "secret"}).status_code == 200
+
+
+def test_health_does_not_retry_model_load_before_cooldown(monkeypatch) -> None:
+    def fail_if_called(_settings):
+        raise AssertionError("health should not retry model load before cooldown")
+
+    monkeypatch.setattr(main_module.transcriber, "_model", None)
+    monkeypatch.setattr(main_module, "model_load_error", "previous failure")
+    monkeypatch.setattr(main_module, "model_load_retry_after", main_module.monotonic() + 60)
+    monkeypatch.setattr(main_module, "resolve_model_source", fail_if_called)
+
+    response = asyncio.run(health())
+    assert response.status == "degraded"
+    assert response.model_error == "previous failure"

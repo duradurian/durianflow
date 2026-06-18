@@ -41,10 +41,22 @@ def configured_allowed_origins(settings: Settings) -> set[str]:
     }
 
 
-def is_allowed_origin(origin: str | None, settings: Settings) -> bool:
+def is_valid_api_token(token: str | None, settings: Settings) -> bool:
+    expected = str(settings.API_TOKEN or "")
+    return bool(expected) and token == expected
+
+
+def bearer_token(authorization: str | None) -> str | None:
+    value = str(authorization or "").strip()
+    if not value.lower().startswith("bearer "):
+        return None
+    return value[7:].strip() or None
+
+
+def is_allowed_origin(origin: str | None, settings: Settings, *, allow_local_origins: bool = True) -> bool:
     raw = str(origin or "").strip()
     value = raw if raw == "file://" else raw.rstrip("/")
-    if value in LOCAL_ORIGINS:
+    if allow_local_origins and value in LOCAL_ORIGINS:
         return True
 
     allowed = configured_allowed_origins(settings)
@@ -75,7 +87,8 @@ def validate_websocket_trust(websocket: WebSocket, settings: Settings) -> tuple[
         return False, "Host is not allowed in local desktop mode."
 
     origin = websocket.headers.get("origin")
-    if not is_allowed_origin(origin, settings):
+    allow_local_origins = not settings.OPENFLOW_SERVER_MODE or is_loopback_host(host)
+    if not is_allowed_origin(origin, settings, allow_local_origins=allow_local_origins):
         return False, "Origin is not allowed."
 
     return True, ""

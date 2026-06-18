@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from app.config import Settings
 from app.schemas import ErrorEvent, ReadyEvent, StartMessage, StatusEvent, StopMessage
-from app.security import validate_websocket_trust
+from app.security import bearer_token, is_valid_api_token, validate_websocket_trust
 from app.session import TranscriptionSession, TranscriberProtocol
 
 logger = logging.getLogger(__name__)
@@ -40,14 +40,17 @@ async def handle_transcription_socket(
         return
 
     if settings.REQUIRE_API_TOKEN:
-        token = websocket.query_params.get("token") or websocket.headers.get("x-api-token")
-        if not token or token != settings.API_TOKEN:
+        token = (
+            websocket.headers.get("x-api-token")
+            or bearer_token(websocket.headers.get("authorization"))
+            or websocket.query_params.get("token")
+        )
+        if not is_valid_api_token(token, settings):
             await websocket.close(code=1008, reason="Unauthorized")
             return
 
     await websocket.accept()
     session: TranscriptionSession | None = None
-    await websocket.send_json(StatusEvent(status="listening").model_dump())
 
     try:
         while True:
@@ -64,6 +67,14 @@ async def handle_transcription_socket(
 
                 message_type = payload.get("type")
                 if message_type == "start":
+                    if session:
+                        await websocket.send_json(error_event("INVALID_MESSAGE", "Session has already started."))
+                        continue
+                    if not getattr(transcriber, "model_loaded", True):
+                        await websocket.send_json(
+                            error_event("MODEL_UNAVAILABLE", "Transcription model is not loaded.")
+                        )
+                        continue
                     try:
                         start = validate_start_message(payload, settings)
                     except (ValidationError, ValueError) as exc:
@@ -86,6 +97,7 @@ async def handle_transcription_socket(
                             sample_rate=settings.SAMPLE_RATE,
                         ).model_dump()
                     )
+                    await websocket.send_json(StatusEvent(status="listening").model_dump())
                 elif message_type == "stop":
                     try:
                         StopMessage.model_validate(payload)
@@ -100,7 +112,8 @@ async def handle_transcription_socket(
                 else:
                     await websocket.send_json(error_event("INVALID_MESSAGE", "Unsupported control message type."))
 
-            elif binary := message.get("bytes"):
+            elif "bytes" in message and message.get("bytes") is not None:
+                binary = message.get("bytes") or b""
                 if not session:
                     await websocket.send_json(
                         error_event("MISSING_START", "Send a start control message before audio frames.")

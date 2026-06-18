@@ -60,9 +60,17 @@ function sendStartMessage() {
   }));
 }
 
+function backendSocketUrl() {
+  const url = new URL(currentConfig.backendUrl);
+  if (currentConfig.backendApiToken && !url.searchParams.has("token")) {
+    url.searchParams.set("token", currentConfig.backendApiToken);
+  }
+  return url.toString();
+}
+
 function connectSocket() {
   return new Promise((resolve, reject) => {
-    socket = new WebSocket(currentConfig.backendUrl);
+    socket = new WebSocket(backendSocketUrl());
     socket.binaryType = "arraybuffer";
 
     socket.onopen = () => {
@@ -100,6 +108,8 @@ function connectSocket() {
     socket.onclose = () => {
       if (isStopping) {
         complete();
+      } else if (socket) {
+        fail("Transcription backend disconnected");
       }
     };
   });

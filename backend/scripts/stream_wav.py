@@ -36,7 +36,14 @@ async def stream(path: Path, url: str, chunk_ms: int) -> None:
                 }
             )
         )
-        print(await ws.recv())
+        while True:
+            message = await ws.recv()
+            print(message)
+            try:
+                if json.loads(message).get("type") == "ready":
+                    break
+            except json.JSONDecodeError:
+                pass
         chunk_samples = int(16000 * chunk_ms / 1000)
         for offset in range(0, len(audio), chunk_samples):
             await ws.send(float32_to_pcm16(audio[offset : offset + chunk_samples]))

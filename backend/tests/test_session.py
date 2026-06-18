@@ -56,3 +56,28 @@ def test_stop_finalizes_active_speech() -> None:
         assert any(event["type"] == "final" for event in events)
 
     asyncio.run(run())
+
+
+def test_session_caps_long_continuous_speech() -> None:
+    async def run() -> None:
+        session = TranscriptionSession(
+            session_id="test",
+            sample_rate=16000,
+            channels=1,
+            language="en",
+            mode="fast",
+            settings=Settings(
+                MAX_BUFFER_SECONDS=1,
+                PARTIAL_INTERVAL_MS=100000,
+                VAD_MIN_SILENCE_MS=100,
+                VAD_MIN_SPEECH_MS=20,
+            ),
+            transcriber=FakeTranscriber(),
+            semaphore=asyncio.Semaphore(1),
+        )
+        speech = np.full(16000 * 2, 0.05, dtype=np.float32)
+        events = await session.accept_pcm16(float32_to_pcm16(speech))
+        assert any(event["type"] == "final" for event in events)
+        assert len(session.speech_buffer) == 0
+
+    asyncio.run(run())

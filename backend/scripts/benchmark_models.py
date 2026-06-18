@@ -16,14 +16,14 @@ from app.transcriber import WhisperTranscriber
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark configured faster-whisper models locally.")
-    parser.add_argument("--models", nargs="*", default=AVAILABLE_MODELS)
+    parser.add_argument("--models", nargs="*")
     parser.add_argument("--seconds", type=int, default=10)
     parser.add_argument("--mode", choices=["fast", "accurate"], default="fast")
     args = parser.parse_args()
 
     settings = get_settings()
     audio = np.zeros(settings.SAMPLE_RATE * args.seconds, dtype=np.float32)
-    for model_name in args.models:
+    for model_name in args.models or [settings.MODEL_NAME]:
         model_settings = Settings(
             MODEL_NAME=model_name,
             MODELS_DIR=settings.MODELS_DIR,

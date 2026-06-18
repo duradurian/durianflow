@@ -221,6 +221,7 @@ API_TOKEN=
 ```
 
 Set `OPENFLOW_SERVER_MODE=true`, `REQUIRE_API_TOKEN=true`, and `API_TOKEN=...` only when intentionally exposing the backend outside local desktop mode.
+For remote browser clients, also set `ALLOWED_ORIGINS` to the exact client origins that may open the WebSocket.
 
 ## Local LLM Refinement
 
@@ -240,11 +241,14 @@ The included Docker setup is NVIDIA-first and runs only the backend.
 
 ```powershell
 Copy-Item backend\.env.example backend\.env
+cd backend
+python scripts\install_model.py --models-dir .\models
+cd ..
 $env:API_TOKEN="replace-with-a-long-random-token"
 docker compose up --build backend
 ```
 
-Compose builds `backend/Dockerfile`, publishes port 8000 on `127.0.0.1` only, requires `API_TOKEN`, requests `gpus: all`, and stores model cache data in the `whisper_model_cache` volume. Install NVIDIA Container Toolkit before using this path.
+Compose builds `backend/Dockerfile`, publishes port 8000 on `127.0.0.1` only, requires `API_TOKEN`, requests `gpus: all`, and mounts `backend/models` at `/app/models`. Install NVIDIA Container Toolkit before using this path.
 
 ## Development Checks
 

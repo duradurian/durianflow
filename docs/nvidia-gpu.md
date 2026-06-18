@@ -22,6 +22,7 @@ Then run:
 
 ```bash
 cp backend/.env.example backend/.env
+python backend/scripts/install_model.py --models-dir backend/models
 export API_TOKEN="replace-with-a-long-random-token"
 docker compose up --build backend
 ```
@@ -39,6 +40,7 @@ nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 ```
 
 This image includes CUDA and cuDNN runtime libraries needed by CTranslate2.
+Compose mounts `backend/models` at `/app/models`; install or copy the model there before starting the container unless you deliberately enable model downloads.
 
 ## Windows Native Python
 

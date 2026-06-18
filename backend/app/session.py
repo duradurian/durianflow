@@ -48,6 +48,7 @@ class TranscriptionSession:
     metrics: SessionMetrics = field(default_factory=SessionMetrics)
     partial_in_flight: bool = False
     final_in_flight: bool = False
+    speech_pad_remaining_samples: int = 0
 
     def __post_init__(self) -> None:
         self.vad_state = EnergyVad(
@@ -70,15 +71,32 @@ class TranscriptionSession:
         events: list[dict] = []
         vad_result = self.vad_state.process(frame)
         if vad_result.speech_started:
+            self.speech_pad_remaining_samples = seconds_to_samples(
+                self.settings.VAD_SPEECH_PAD_MS / 1000,
+                self.sample_rate,
+            )
             events.append(StatusEvent(status="speech_started").model_dump())
         if vad_result.is_speech:
             self.speech_buffer = np.concatenate((self.speech_buffer, frame))
+            self.speech_pad_remaining_samples = seconds_to_samples(
+                self.settings.VAD_SPEECH_PAD_MS / 1000,
+                self.sample_rate,
+            )
             partial = await self._maybe_partial()
             if partial:
                 events.append(partial.model_dump())
+            if samples_to_seconds(len(self.speech_buffer), self.sample_rate) >= self.settings.MAX_BUFFER_SECONDS:
+                events.append(
+                    StatusEvent(status="speech_ended", message="Maximum utterance length reached.").model_dump()
+                )
+                final = await self._finalize_current_speech()
+                if final:
+                    events.append(final.model_dump())
         elif len(self.speech_buffer) > 0:
-            pad = seconds_to_samples(self.settings.VAD_SPEECH_PAD_MS / 1000, self.sample_rate)
-            self.speech_buffer = np.concatenate((self.speech_buffer, frame[:pad]))
+            pad = min(len(frame), self.speech_pad_remaining_samples)
+            if pad > 0:
+                self.speech_buffer = np.concatenate((self.speech_buffer, frame[:pad]))
+                self.speech_pad_remaining_samples -= pad
 
         if vad_result.speech_ended and len(self.speech_buffer) > 0:
             events.append(StatusEvent(status="speech_ended").model_dump())
@@ -95,6 +113,8 @@ class TranscriptionSession:
             final = await self._finalize_current_speech()
             if final:
                 events.append(final.model_dump())
+        elif self.current_partial is not None:
+            events.append(self._promote_current_partial().model_dump())
         events.append(StatusEvent(status="stopped").model_dump())
         return events
 
@@ -156,7 +176,8 @@ class TranscriptionSession:
             previous_text = " ".join(segment.text for segment in self.finalized_segments)
             text = remove_duplicate_overlap(previous_text, text)
             if not text:
-                self.current_partial = None
+                if self.current_partial is not None:
+                    return self._promote_current_partial()
                 return None
 
             duration = samples_to_seconds(len(audio), self.sample_rate)
@@ -171,6 +192,7 @@ class TranscriptionSession:
             self.finalized_segments.append(segment)
             self.current_partial = None
             self.metrics.final_transcriptions += 1
+            self.speech_pad_remaining_samples = 0
             return TranscriptEvent(
                 type="final",
                 session_id=self.session_id,
@@ -182,6 +204,28 @@ class TranscriptionSession:
             )
         finally:
             self.final_in_flight = False
+
+    def _promote_current_partial(self) -> TranscriptEvent:
+        partial = self.current_partial
+        assert partial is not None
+        segment = TranscriptSegment(
+            id=partial.segment_id,
+            start=partial.start,
+            end=partial.end,
+            text=partial.text,
+        )
+        self.finalized_segments.append(segment)
+        self.current_partial = None
+        self.metrics.final_transcriptions += 1
+        return TranscriptEvent(
+            type="final",
+            session_id=self.session_id,
+            segment_id=segment.id,
+            text=segment.text,
+            start=segment.start,
+            end=segment.end,
+            is_final=True,
+        )
 
     async def _run_transcription(self, audio: np.ndarray) -> list[TranscriptSegment]:
         async with self.semaphore:

@@ -78,6 +78,7 @@ The settings UI supports:
 - automatic paste
 - trailing space after inserted text
 - backend WebSocket and health URLs
+- backend API token for server-mode backends
 - explicit remote backend URL opt-in
 - automatic backend startup
 - optional local LLM text refinement through llama.cpp or Ollama
@@ -89,6 +90,7 @@ Supported settings:
 {
   "backendUrl": "ws://127.0.0.1:8000/v1/transcribe",
   "healthUrl": "http://127.0.0.1:8000/health",
+  "backendApiToken": "",
   "allowRemoteBackend": false,
   "hotkey": "CommandOrControl+Alt+Space",
   "language": "en",
@@ -123,4 +125,4 @@ Short dictations wait up to the configured latency budget for refined text. Long
 
 - Hold mode uses a small Windows key-state watcher so the app can detect hotkey release.
 - Text insertion uses the Windows clipboard plus a synthetic `Ctrl+V` keypress. The previous clipboard text is restored shortly after paste when possible.
-- The microphone recorder runs in a hidden sandboxed renderer process and streams raw `pcm_s16le`, mono, 16 kHz audio to the backend WebSocket API.
+- The microphone recorder runs in a hidden renderer process and streams raw `pcm_s16le`, mono, 16 kHz audio to the backend WebSocket API.

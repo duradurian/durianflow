@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* ws: wss: http: https:;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*;">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Openflow Advanced Settings</title>
     <style>
@@ -259,6 +259,10 @@
               <label class="wide">
                 Backend health check URL
                 <input id="healthUrl" name="healthUrl" autocomplete="off" spellcheck="false">
+              </label>
+              <label class="wide">
+                Backend API token
+                <input id="backendApiToken" name="backendApiToken" type="password" autocomplete="off" spellcheck="false">
               </label>
               <label class="option wide">
                 <input id="allowRemoteBackend" name="allowRemoteBackend" type="checkbox">

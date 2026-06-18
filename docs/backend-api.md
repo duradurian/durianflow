@@ -43,6 +43,6 @@ The client sends a `start` JSON message, then binary PCM frames. The server send
 
 ## Optional API Token
 
-Set `REQUIRE_API_TOKEN=true` and `API_TOKEN=...`. Clients can pass `?token=...` on the WebSocket URL or `x-api-token` where supported.
+Set `REQUIRE_API_TOKEN=true` and `API_TOKEN=...`. HTTP clients must send `x-api-token` or `Authorization: Bearer <token>` for `/health` and `/v1/models`. WebSocket clients can use `x-api-token`, `Authorization: Bearer <token>`, or `?token=...` when custom headers are not available.
 
-Non-loopback/server mode requires `OPENFLOW_SERVER_MODE=true`, `REQUIRE_API_TOKEN=true`, and a non-empty `API_TOKEN`.
+Non-loopback/server mode requires `OPENFLOW_SERVER_MODE=true`, `REQUIRE_API_TOKEN=true`, and a non-empty `API_TOKEN`. Remote browser clients must also be listed in `ALLOWED_ORIGINS`, for example `ALLOWED_ORIGINS=https://app.example.com`.

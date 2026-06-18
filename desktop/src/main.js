@@ -20,12 +20,14 @@ const {
   assertTrustedFileSender,
   installPermissionPolicy,
   isTrustedFileSender,
+  registerTrustedWindow,
   secureWebPreferences,
 } = require("./window_security");
 
 const DEFAULT_CONFIG = {
   backendUrl: "ws://127.0.0.1:8000/v1/transcribe",
   healthUrl: "http://127.0.0.1:8000/health",
+  backendApiToken: "",
   allowRemoteBackend: false,
   hotkey: "CommandOrControl+Alt+Space",
   language: "en",
@@ -54,11 +56,11 @@ let settingsWindow;
 let advancedSettingsWindow;
 let tray;
 let backendProcess;
+let backendStartPromise;
 let holdWatcherProcess;
 let isRecording = false;
 let isQuitting = false;
 let isCapturingHotkey = false;
-let lastClipboardText = null;
 let llmLoadState = { key: "", state: "off", provider: "", baseUrl: "", model: "" };
 let llmLoadRequestId = 0;
 
@@ -138,6 +140,7 @@ function sanitizeConfig(nextConfig) {
     ...nextConfig,
     backendUrl: sanitizeBackendUrl(nextConfig?.backendUrl, DEFAULT_CONFIG.backendUrl, allowRemoteBackend),
     healthUrl: sanitizeHttpServiceUrl(nextConfig?.healthUrl, DEFAULT_CONFIG.healthUrl, allowRemoteBackend),
+    backendApiToken: String(nextConfig?.backendApiToken || "").trim(),
     allowRemoteBackend,
     hotkey: isSafeAccelerator(hotkey) ? hotkey : DEFAULT_CONFIG.hotkey,
     language: nextConfig?.language ? String(nextConfig.language).trim() : null,
@@ -359,6 +362,7 @@ function createRecorderWindow() {
   });
 
   recorderWindow.loadFile(path.join(__dirname, "recorder.html"));
+  registerTrustedWindow(recorderWindow);
 }
 
 function createStatusWindow() {
@@ -380,6 +384,7 @@ function createStatusWindow() {
   });
 
   statusWindow.loadFile(path.join(__dirname, "status.html"));
+  registerTrustedWindow(statusWindow);
 }
 
 function settingsWindowBounds() {
@@ -458,9 +463,11 @@ function createSettingsWindow() {
   });
 
   settingsWindow.loadFile(path.join(__dirname, "settings.html"));
+  registerTrustedWindow(settingsWindow);
   settingsWindow.on("close", (event) => {
     if (!isQuitting) {
       event.preventDefault();
+      endHotkeyCapture();
       settingsWindow.hide();
     }
   });
@@ -501,6 +508,7 @@ function createAdvancedSettingsWindow() {
   });
 
   advancedSettingsWindow.loadFile(path.join(__dirname, "advanced_settings.html"));
+  registerTrustedWindow(advancedSettingsWindow);
   advancedSettingsWindow.on("close", (event) => {
     if (!isQuitting) {
       event.preventDefault();
@@ -711,14 +719,23 @@ function applyShortcutRegistration() {
   return ok;
 }
 
-async function backendHealth() {
-  const status = await backendStatus();
-  return status.ok;
+function endHotkeyCapture() {
+  isCapturingHotkey = false;
+  return { ok: applyShortcutRegistration() };
 }
 
-async function backendStatus() {
+async function backendHealth() {
+  const status = await backendStatus();
+  return status.ok && status.modelLoaded;
+}
+
+async function backendStatus(overrideConfig = config) {
   try {
-    const response = await fetch(config.healthUrl);
+    const headers = {};
+    if (overrideConfig.backendApiToken) {
+      headers["x-api-token"] = overrideConfig.backendApiToken;
+    }
+    const response = await fetch(overrideConfig.healthUrl, { headers });
     if (!response.ok) {
       return { ok: false, state: "offline", message: `HTTP ${response.status}` };
     }
@@ -806,31 +823,54 @@ async function startBackendIfNeeded() {
   if (!config.autoStartBackend || await backendHealth()) {
     return;
   }
-
-  const python = path.join(backendDir, ".venv", "Scripts", "python.exe");
-  if (fs.existsSync(python)) {
-    backendProcess = spawn(python, ["scripts\\run_server.py"], {
-      cwd: backendDir,
-      windowsHide: true,
-      stdio: "ignore",
-    });
-  } else {
-    backendProcess = spawn("powershell.exe", [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      path.join(backendDir, "run_backend.ps1"),
-    ], {
-      cwd: backendDir,
-      windowsHide: true,
-      stdio: "ignore",
-    });
+  if (backendStartPromise) {
+    return backendStartPromise;
+  }
+  if (backendProcess) {
+    return;
   }
 
-  backendProcess.on("exit", () => {
-    backendProcess = null;
+  backendStartPromise = new Promise((resolve) => {
+    const python = path.join(backendDir, ".venv", "Scripts", "python.exe");
+    const child = fs.existsSync(python)
+      ? spawn(python, ["scripts\\run_server.py"], {
+        cwd: backendDir,
+        windowsHide: true,
+        stdio: "ignore",
+      })
+      : spawn("powershell.exe", [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        path.join(backendDir, "run_backend.ps1"),
+      ], {
+        cwd: backendDir,
+        windowsHide: true,
+        stdio: "ignore",
+      });
+
+    backendProcess = child;
+    child.on("error", (error) => {
+      if (backendProcess === child) {
+        backendProcess = null;
+      }
+      showStatus("error", error.message || "Could not start backend");
+      resolve();
+    });
+    child.on("exit", () => {
+      if (backendProcess === child) {
+        backendProcess = null;
+      }
+    });
+    setTimeout(resolve, 1000);
   });
+
+  try {
+    await backendStartPromise;
+  } finally {
+    backendStartPromise = null;
+  }
 }
 
 async function startDictation() {
@@ -901,7 +941,7 @@ function pasteText(text, insertedMessage = "Inserted dictation") {
     return;
   }
 
-  lastClipboardText = clipboard.readText();
+  const previousClipboardText = clipboard.readText();
   clipboard.writeText(normalized);
 
   if (!config.autoPaste) {
@@ -919,15 +959,30 @@ function pasteText(text, insertedMessage = "Inserted dictation") {
     stdio: "ignore",
   });
 
-  pasteProcess.on("exit", () => {
-    showStatus("ready", insertedMessage);
+  let finished = false;
+  const restoreClipboard = () => {
+    if (clipboard.readText() === normalized) {
+      clipboard.writeText(previousClipboardText);
+    }
+  };
+  const finishPaste = (message = insertedMessage) => {
+    if (finished) {
+      return;
+    }
+    finished = true;
+    showStatus("ready", message);
     setTimeout(() => {
-      if (lastClipboardText !== null && clipboard.readText() === normalized) {
-        clipboard.writeText(lastClipboardText);
-      }
-      lastClipboardText = null;
+      restoreClipboard();
     }, 800);
+  };
+
+  pasteProcess.on("error", () => {
+    restoreClipboard();
+    showStatus("error", "Could not paste transcript");
+    finished = true;
   });
+  pasteProcess.on("exit", () => finishPaste());
+  setTimeout(() => finishPaste("Inserted dictation"), 2500);
 }
 
 function fallbackStatusMessage(result) {
@@ -993,7 +1048,7 @@ trustedOn("dictation:complete", (_event, payload) => {
 trustedOn("dictation:error", (_event, payload) => {
   isRecording = false;
   setTrayMenu();
-  showStatus("error", payload?.message || "Dictation failed", true);
+  showStatus("error", payload?.message || "Dictation failed");
 });
 
 trustedOn("dictation:status", (_event, payload) => {
@@ -1015,8 +1070,7 @@ trustedHandle("hotkey-capture:start", () => {
 });
 
 trustedHandle("hotkey-capture:end", () => {
-  isCapturingHotkey = false;
-  return { ok: applyShortcutRegistration() };
+  return endHotkeyCapture();
 });
 
 trustedHandle("config:save", (_event, nextConfig) => {
@@ -1052,12 +1106,12 @@ trustedHandle("config:save", (_event, nextConfig) => {
   };
 });
 
-trustedHandle("backend:test", async (_event, healthUrl) => {
-  const previousHealthUrl = config.healthUrl;
-  config.healthUrl = sanitizeHttpServiceUrl(healthUrl, config.healthUrl, config.allowRemoteBackend);
-  const status = await backendStatus();
-  config.healthUrl = previousHealthUrl;
-  return status;
+trustedHandle("backend:test", async (_event, nextConfig) => {
+  const testConfig = sanitizeConfig({
+    ...config,
+    ...(typeof nextConfig === "object" ? nextConfig : { healthUrl: nextConfig }),
+  });
+  return backendStatus(testConfig);
 });
 
 trustedHandle("ollama:models", async (_event, baseUrl) => {
@@ -1104,7 +1158,7 @@ app.whenReady().then(async () => {
   createRecorderWindow();
   createStatusWindow();
   createSettingsWindow();
-  installPermissionPolicy(require("electron").session.defaultSession, () => recorderWindow);
+  installPermissionPolicy(require("electron").session.defaultSession, () => [recorderWindow, settingsWindow]);
 
   tray = new Tray(createTrayIcon());
   tray.setToolTip(PRODUCT_NAME);

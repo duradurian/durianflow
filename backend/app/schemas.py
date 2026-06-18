@@ -59,7 +59,7 @@ class TranscriptEvent(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    status: Literal["ok"]
+    status: Literal["ok", "degraded"]
     app: str
     model_loaded: bool
     model_error: str | None = None

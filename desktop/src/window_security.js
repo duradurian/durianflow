@@ -1,3 +1,5 @@
+const trustedWebContentsIds = new Set();
+
 function secureWebPreferences(options = {}) {
   return {
     ...options,
@@ -7,9 +9,21 @@ function secureWebPreferences(options = {}) {
   };
 }
 
+function registerTrustedWindow(window) {
+  if (window && !window.isDestroyed()) {
+    trustedWebContentsIds.add(window.webContents.id);
+    window.on("closed", () => {
+      trustedWebContentsIds.delete(window.webContents.id);
+    });
+    window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    window.webContents.on("will-navigate", (event) => {
+      event.preventDefault();
+    });
+  }
+}
+
 function isTrustedFileSender(event) {
-  const url = event?.senderFrame?.url || "";
-  return url.startsWith("file://");
+  return trustedWebContentsIds.has(event?.sender?.id);
 }
 
 function assertTrustedFileSender(event) {
@@ -18,10 +32,10 @@ function assertTrustedFileSender(event) {
   }
 }
 
-function installPermissionPolicy(session, getRecorderWindow) {
+function installPermissionPolicy(session, getMediaWindows) {
   session.setPermissionRequestHandler((webContents, permission, callback) => {
-    const recorderWindow = getRecorderWindow();
-    callback(permission === "media" && recorderWindow?.webContents === webContents);
+    const windows = getMediaWindows();
+    callback(permission === "media" && windows.some((window) => window?.webContents === webContents));
   });
 }
 
@@ -29,5 +43,6 @@ module.exports = {
   assertTrustedFileSender,
   installPermissionPolicy,
   isTrustedFileSender,
+  registerTrustedWindow,
   secureWebPreferences,
 };

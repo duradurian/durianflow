@@ -1,6 +1,7 @@
 const DEFAULT_ADVANCED = {
   backendUrl: "ws://127.0.0.1:8000/v1/transcribe",
   healthUrl: "http://127.0.0.1:8000/health",
+  backendApiToken: "",
   allowRemoteBackend: false,
   autoStartBackend: true,
   llmEnabled: false,
@@ -26,6 +27,7 @@ const refreshOllamaModelsButton = document.getElementById("refresh-ollama-models
 const fields = {
   backendUrl: document.getElementById("backendUrl"),
   healthUrl: document.getElementById("healthUrl"),
+  backendApiToken: document.getElementById("backendApiToken"),
   allowRemoteBackend: document.getElementById("allowRemoteBackend"),
   autoStartBackend: document.getElementById("autoStartBackend"),
   llmEnabled: document.getElementById("llmEnabled"),
@@ -60,10 +62,18 @@ function setFormDisabled(disabled) {
 }
 
 function readAdvancedConfig() {
+  const numberValue = (field, fallback) => {
+    if (!field.value.trim()) {
+      return fallback;
+    }
+    return Number.isFinite(field.valueAsNumber) ? field.valueAsNumber : fallback;
+  };
+
   return {
     ...currentConfig,
     backendUrl: fields.backendUrl.value.trim(),
     healthUrl: fields.healthUrl.value.trim(),
+    backendApiToken: fields.backendApiToken.value.trim(),
     allowRemoteBackend: fields.allowRemoteBackend.checked,
     autoStartBackend: fields.autoStartBackend.checked,
     llmEnabled: fields.llmEnabled.checked,
@@ -74,8 +84,8 @@ function readAdvancedConfig() {
     ollamaModel: fields.ollamaModel.value.trim(),
     allowRemoteLlm: fields.allowRemoteLlm.checked,
     llmMode: fields.llmMode.value,
-    llmLatencyBudgetMs: Number(fields.llmLatencyBudgetMs.value),
-    llmMaxBlockingChars: Number(fields.llmMaxBlockingChars.value),
+    llmLatencyBudgetMs: numberValue(fields.llmLatencyBudgetMs, currentConfig.llmLatencyBudgetMs),
+    llmMaxBlockingChars: numberValue(fields.llmMaxBlockingChars, currentConfig.llmMaxBlockingChars),
   };
 }
 
@@ -83,6 +93,7 @@ function snapshotConfig(config) {
   return JSON.stringify({
     backendUrl: config.backendUrl,
     healthUrl: config.healthUrl,
+    backendApiToken: config.backendApiToken,
     allowRemoteBackend: Boolean(config.allowRemoteBackend),
     autoStartBackend: Boolean(config.autoStartBackend),
     llmEnabled: Boolean(config.llmEnabled),
@@ -144,6 +155,7 @@ function writeFormConfig(config, markSaved = false) {
   currentConfig = config;
   fields.backendUrl.value = config.backendUrl || DEFAULT_ADVANCED.backendUrl;
   fields.healthUrl.value = config.healthUrl || DEFAULT_ADVANCED.healthUrl;
+  fields.backendApiToken.value = config.backendApiToken || DEFAULT_ADVANCED.backendApiToken;
   fields.allowRemoteBackend.checked = Boolean(config.allowRemoteBackend);
   fields.autoStartBackend.checked = Boolean(config.autoStartBackend);
   fields.llmEnabled.checked = Boolean(config.llmEnabled);
@@ -262,7 +274,7 @@ testBackendButton.addEventListener("click", async () => {
   setMessage("Testing backend");
 
   try {
-    const result = await window.openflow.testBackend(fields.healthUrl.value.trim());
+    const result = await window.openflow.testBackend(readAdvancedConfig());
     setMessage(result.ok ? "Backend online" : result.message || "Backend offline", result.ok ? "ok" : "error");
   } catch {
     setMessage("Backend offline", "error");
@@ -278,6 +290,9 @@ resetAdvancedButton.addEventListener("click", () => {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (!form.reportValidity()) {
+    return;
+  }
   setFormDisabled(true);
   setMessage("Saving");
 

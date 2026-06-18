@@ -15,8 +15,5 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
-      - whisper_model_cache:/root/.cache
+      - ./backend/models:/app/models
     gpus: all
-
-volumes:
-  whisper_model_cache:
