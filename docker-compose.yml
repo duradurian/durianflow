@@ -1,0 +1,18 @@
+services:
+  backend:
+    build: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      DEVICE: cuda
+      COMPUTE_TYPE: float16
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    ports:
+      - "8000:8000"
+    volumes:
+      - whisper_model_cache:/root/.cache
+    gpus: all
+
+volumes:
+  whisper_model_cache:

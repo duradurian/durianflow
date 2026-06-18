@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>TrueScribe</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "Segoe UI", system-ui, sans-serif;
+      }
+
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: transparent;
+      }
+
+      .shell {
+        box-sizing: border-box;
+        width: 360px;
+        height: 96px;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 18px;
+        color: #f9fafb;
+        background: rgba(17, 24, 39, 0.96);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 8px;
+        box-shadow: 0 18px 40px rgba(0, 0, 0, 0.36);
+      }
+
+      .indicator {
+        width: 16px;
+        height: 16px;
+        border-radius: 999px;
+        background: #38bdf8;
+        box-shadow: 0 0 0 6px rgba(56, 189, 248, 0.16);
+        flex: 0 0 auto;
+      }
+
+      .recording .indicator {
+        background: #ef4444;
+        box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.18);
+        animation: pulse 1.2s ease-in-out infinite;
+      }
+
+      .transcribing .indicator {
+        background: #f59e0b;
+        box-shadow: 0 0 0 6px rgba(245, 158, 11, 0.16);
+      }
+
+      .error .indicator {
+        background: #fb7185;
+        box-shadow: 0 0 0 6px rgba(251, 113, 133, 0.16);
+      }
+
+      .title {
+        font-size: 13px;
+        font-weight: 600;
+        line-height: 1.25;
+      }
+
+      .message {
+        max-width: 280px;
+        margin-top: 4px;
+        color: #cbd5e1;
+        font-size: 13px;
+        line-height: 1.3;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      @keyframes pulse {
+        0%, 100% {
+          transform: scale(1);
+        }
+        50% {
+          transform: scale(1.18);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="shell" class="shell ready">
+      <div class="indicator"></div>
+      <div>
+        <div class="title">TrueScribe</div>
+        <div id="message" class="message">Ready</div>
+      </div>
+    </div>
+    <script src="./status.js"></script>
+  </body>
+</html>

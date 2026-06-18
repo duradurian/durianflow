@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+numpy
+scipy
+soundfile
+faster-whisper
+websockets
+pytest
+python-dotenv

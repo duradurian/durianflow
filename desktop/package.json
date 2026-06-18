@@ -1,0 +1,15 @@
+{
+  "name": "truescribe",
+  "productName": "TrueScribe",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Windows push-to-talk dictation client for the Whisper Live backend.",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/recorder.js && node --check src/settings.js && node --check src/advanced_settings.js && node --check src/status.js && node --check src/text_processor.js"
+  },
+  "devDependencies": {
+    "electron": "^42.0.1"
+  }
+}

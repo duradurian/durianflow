@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>TrueScribe Advanced Settings</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        --bg: #f3f6fa;
+        --surface: #ffffff;
+        --surface-muted: #f8fafc;
+        --surface-alt: #eef2f6;
+        --border: #d8dee8;
+        --border-strong: #cbd5e1;
+        --text: #111827;
+        --text-strong: #172033;
+        --muted: #64748b;
+        --accent: #0f766e;
+        --primary: #172033;
+        --primary-text: #ffffff;
+        --danger: #be123c;
+        --focus-border: #0284c7;
+        --focus: rgba(14, 165, 233, 0.2);
+        --shadow: 0 10px 24px rgba(15, 23, 42, 0.07);
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0f141c;
+          --surface: #171e29;
+          --surface-muted: #111827;
+          --surface-alt: #101722;
+          --border: #2b3544;
+          --border-strong: #3a4657;
+          --text: #e5e7eb;
+          --text-strong: #f8fafc;
+          --muted: #94a3b8;
+          --accent: #34d399;
+          --primary: #f8fafc;
+          --primary-text: #111827;
+          --danger: #fb7185;
+          --focus-border: #38bdf8;
+          --focus: rgba(56, 189, 248, 0.22);
+          --shadow: none;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        overflow: hidden;
+      }
+
+      main {
+        width: 100vw;
+        height: 100vh;
+        padding: 14px;
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        gap: 10px;
+      }
+
+      header,
+      .footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 20px;
+        font-weight: 700;
+        letter-spacing: 0;
+      }
+
+      h2 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--text-strong);
+        letter-spacing: 0;
+      }
+
+      .subtitle,
+      .helper,
+      .message {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .helper {
+        display: block;
+        font-size: 11px;
+        line-height: 1.25;
+      }
+
+      form {
+        min-height: 0;
+        display: grid;
+        grid-template-rows: 1fr auto;
+        gap: 10px;
+      }
+
+      .content {
+        min-height: 0;
+        overflow: auto;
+        display: grid;
+        align-content: start;
+        gap: 10px;
+        padding-right: 2px;
+      }
+
+      .panel {
+        display: grid;
+        gap: 10px;
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      label,
+      .field {
+        display: grid;
+        gap: 6px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 500;
+      }
+
+      input,
+      select {
+        width: 100%;
+        min-height: 32px;
+        padding: 5px 8px;
+        border: 1px solid var(--border-strong);
+        border-radius: 8px;
+        color: var(--text-strong);
+        background: var(--surface);
+        font: inherit;
+        font-weight: 500;
+      }
+
+      input:focus,
+      select:focus {
+        outline: 3px solid var(--focus);
+        outline-offset: 1px;
+        border-color: var(--focus-border);
+      }
+
+      .wide {
+        grid-column: 1 / -1;
+      }
+
+      .option {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 10px;
+        align-items: start;
+        color: var(--text-strong);
+        font-size: 12px;
+        font-weight: 500;
+      }
+
+      .option input {
+        width: 16px;
+        min-height: 16px;
+        margin-top: 2px;
+        accent-color: var(--accent);
+      }
+
+      .model-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: end;
+      }
+
+      .actions {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+      }
+
+      button {
+        min-height: 32px;
+        padding: 0 11px;
+        border: 1px solid var(--border-strong);
+        border-radius: 8px;
+        background: var(--surface);
+        color: var(--text-strong);
+        font: inherit;
+        font-weight: 650;
+        cursor: pointer;
+      }
+
+      button.primary {
+        border-color: var(--primary);
+        background: var(--primary);
+        color: var(--primary-text);
+      }
+
+      button:disabled,
+      input:disabled,
+      select:disabled {
+        cursor: default;
+        opacity: 0.55;
+      }
+
+      .message.error {
+        color: var(--danger);
+      }
+
+      .message.ok {
+        color: var(--accent);
+      }
+
+      .hidden {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>Advanced Settings</h1>
+          <div class="subtitle">Backend, startup, and writing assistance configuration.</div>
+        </div>
+      </header>
+
+      <form id="advanced-form">
+        <div class="content">
+          <section class="panel">
+            <h2>Backend</h2>
+            <div class="grid">
+              <label class="wide">
+                WebSocket URL
+                <input id="backendUrl" name="backendUrl" autocomplete="off" spellcheck="false">
+              </label>
+              <label class="wide">
+                Backend health check URL
+                <input id="healthUrl" name="healthUrl" autocomplete="off" spellcheck="false">
+              </label>
+              <label class="option wide">
+                <input id="autoStartBackend" name="autoStartBackend" type="checkbox">
+                <span>Start backend automatically</span>
+              </label>
+            </div>
+          </section>
+
+          <section class="panel">
+            <h2>Writing Assistance</h2>
+            <label class="option">
+              <input id="llmEnabled" name="llmEnabled" type="checkbox">
+              <span>
+                Refine dictated text with a local LLM
+                <span class="helper">Uses either llama.cpp or Ollama after transcription.</span>
+              </span>
+            </label>
+
+            <div class="grid">
+              <label>
+                LLM provider
+                <select id="llmProvider" name="llmProvider">
+                  <option value="llamacpp">llama.cpp OpenAI-compatible server</option>
+                  <option value="ollama">Ollama</option>
+                </select>
+              </label>
+              <label>
+                Refinement mode
+                <select id="llmMode" name="llmMode">
+                  <option value="off">Off</option>
+                  <option value="grammar">Grammar</option>
+                  <option value="format">Format</option>
+                  <option value="enhance">Enhance</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="grid">
+              <label data-provider-field="llamacpp">
+                llama.cpp chat completions URL
+                <input id="llmServerUrl" name="llmServerUrl" autocomplete="off" spellcheck="false">
+              </label>
+              <label data-provider-field="llamacpp">
+                llama.cpp model
+                <input id="llmModel" name="llmModel" autocomplete="off" spellcheck="false">
+              </label>
+            </div>
+
+            <label data-provider-field="ollama" class="hidden">
+              Ollama server URL
+              <input id="ollamaServerUrl" name="ollamaServerUrl" autocomplete="off" spellcheck="false">
+            </label>
+            <div data-provider-field="ollama" class="model-row hidden">
+              <label>
+                Ollama model
+                <select id="ollamaModel" name="ollamaModel"></select>
+                <span class="helper">Scans downloaded Ollama models from the local server, CLI, or model manifests.</span>
+              </label>
+              <button id="refresh-ollama-models" type="button">Scan models</button>
+            </div>
+
+            <div class="grid">
+              <label>
+                Short text budget (ms)
+                <input id="llmLatencyBudgetMs" name="llmLatencyBudgetMs" type="number" min="0" max="5000" step="50">
+                <span class="helper">Set to 0 to wait until the LLM finishes.</span>
+              </label>
+              <label>
+                Max blocking length (characters)
+                <input id="llmMaxBlockingChars" name="llmMaxBlockingChars" type="number" min="1" max="5000" step="25">
+              </label>
+            </div>
+          </section>
+        </div>
+
+        <footer class="footer">
+          <div>
+            <div id="form-message" class="message">No unsaved changes</div>
+            <div id="version-message" class="helper">Version loading</div>
+          </div>
+          <div class="actions">
+            <button id="test-backend" type="button">Test Backend</button>
+            <button id="reset-advanced" type="button">Reset</button>
+            <button id="save-settings" class="primary" type="submit" disabled>Save changes</button>
+          </div>
+        </footer>
+      </form>
+    </main>
+
+    <script src="./advanced_settings.js"></script>
+  </body>
+</html>
