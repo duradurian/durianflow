@@ -1,5 +1,7 @@
 # Openflow
 
+Note: App is in very early stages and has known issues. Treat it like a prototype.
+
 Openflow is a local Windows dictation app that turns speech into text in any focused textbox. It combines an Electron tray client with a FastAPI transcription backend powered by `faster-whisper` and CTranslate2.
 
 Openflow does not use the hosted OpenAI API. Speech recognition runs on your own machine or server.
