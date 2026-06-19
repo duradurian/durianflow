@@ -78,7 +78,7 @@ async def health() -> HealthResponse:
             resolve_model_source(settings)
         except Exception as exc:
             model_load_error = str(exc)
-            model_load_retry_after = monotonic() + MODEL_LOAD_RETRY_SECONDS
+            model_load_retry_after = monotonic() + model_load_retry_seconds()
         else:
             await try_load_model()
 
@@ -93,6 +93,8 @@ async def health() -> HealthResponse:
         model_retry_after_seconds=model_retry_after_seconds(),
         device=settings.DEVICE,
         compute_type=settings.COMPUTE_TYPE,
+        active_device=transcriber.active_device,
+        active_compute_type=transcriber.active_compute_type,
     )
 
 

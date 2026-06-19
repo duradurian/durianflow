@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.config import Settings
+from app.config import BACKEND_ROOT, Settings
 
 
 class ModelUnavailableError(RuntimeError):
@@ -16,7 +16,7 @@ def _resolve_path(value: str) -> Path:
     path = Path(value).expanduser()
     if path.is_absolute():
         return path
-    return (Path.cwd() / path).resolve()
+    return (BACKEND_ROOT / path).resolve()
 
 
 def model_dir_name(model_name: str) -> str:
@@ -63,6 +63,7 @@ def resolve_model_source(settings: Settings) -> tuple[str, bool]:
 
     raise ModelUnavailableError(
         f"Local Whisper model was not found at {path}. "
-        f"Run `python scripts/install_model.py {settings.MODEL_NAME}` from backend/ "
-        "or set MODEL_PATH to an existing faster-whisper model directory."
+        f"Run `python scripts/install_model.py {settings.MODEL_NAME}` from backend/, "
+        "set MODEL_PATH to an existing faster-whisper model directory, "
+        "or set ALLOW_MODEL_DOWNLOAD=true to let faster-whisper download/cache it at startup."
     )

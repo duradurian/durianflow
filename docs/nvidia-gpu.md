@@ -40,7 +40,7 @@ nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 ```
 
 This image includes CUDA and cuDNN runtime libraries needed by CTranslate2.
-Compose mounts `backend/models` at `/app/models`; install or copy the model there before starting the container unless you deliberately enable model downloads.
+Compose mounts `backend/models` at `/app/models`; install or copy the model there before starting the container for repeatable offline startup, or keep model downloads enabled so faster-whisper can populate the cache.
 
 ## Windows Native Python
 

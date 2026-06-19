@@ -15,7 +15,7 @@ python scripts/run_server.py
 
 Open `http://127.0.0.1:8000/health`.
 
-Normal backend startup does not download models. Install models explicitly with `scripts/install_model.py`, or set `MODEL_PATH` in `.env` to an existing faster-whisper model directory.
+Normal local backend startup can download and cache the configured model when `ALLOW_MODEL_DOWNLOAD=true`. For fully offline startup, install models explicitly with `scripts/install_model.py`, or set `MODEL_PATH` in `.env` to an existing faster-whisper model directory and set `ALLOW_MODEL_DOWNLOAD=false`.
 
 For CPU machines edit `.env`:
 

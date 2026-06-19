@@ -1,7 +1,11 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
@@ -12,7 +16,8 @@ class Settings(BaseSettings):
     MODEL_NAME: str = "large-v3-turbo"
     MODELS_DIR: str = "./models"
     MODEL_PATH: str | None = None
-    ALLOW_MODEL_DOWNLOAD: bool = False
+    ALLOW_MODEL_DOWNLOAD: bool = True
+    FALLBACK_TO_CPU_ON_CUDA_ERROR: bool = True
     DEVICE: str = "cuda"
     COMPUTE_TYPE: str = "float16"
     LANGUAGE: str = "en"
@@ -32,7 +37,7 @@ class Settings(BaseSettings):
     VAD_ENERGY_THRESHOLD: float = Field(default=0.01, gt=0)
     VAD_MIN_SPEECH_MS: int = 120
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(env_file=str(BACKEND_ROOT / ".env"), env_file_encoding="utf-8")
 
 
 @lru_cache

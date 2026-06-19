@@ -11,6 +11,13 @@ sys.path.insert(0, str(ROOT))
 from app.model_store import is_valid_model_dir, model_dir_name
 
 
+def resolve_models_dir(value: str) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path
+    return (ROOT / path).resolve()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Install a faster-whisper model for offline Openflow startup.")
     parser.add_argument("model", nargs="?", default="large-v3-turbo", help="Model name or Hugging Face repo id.")
@@ -18,7 +25,7 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="Replace an existing incomplete or stale model directory.")
     args = parser.parse_args()
 
-    models_dir = Path(args.models_dir).expanduser().resolve()
+    models_dir = resolve_models_dir(args.models_dir)
     target = models_dir / model_dir_name(args.model)
     temp = models_dir / f".{target.name}.tmp"
     models_dir.mkdir(parents=True, exist_ok=True)

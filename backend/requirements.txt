@@ -8,4 +8,5 @@ soundfile
 faster-whisper
 websockets
 pytest
+httpx
 python-dotenv

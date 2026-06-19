@@ -15,7 +15,7 @@ const {
   unloadOtherOllamaModels,
   unloadOllamaModel,
 } = require("./text_processor");
-const { sanitizeBackendUrl, sanitizeHttpServiceUrl } = require("./url_policy");
+const { isLocalHost, sanitizeBackendUrl, sanitizeHttpServiceUrl } = require("./url_policy");
 const {
   assertTrustedFileSender,
   installPermissionPolicy,
@@ -724,9 +724,12 @@ function endHotkeyCapture() {
   return { ok: applyShortcutRegistration() };
 }
 
-async function backendHealth() {
-  const status = await backendStatus();
-  return status.ok && status.modelLoaded;
+function isLocalServiceUrl(value) {
+  try {
+    return isLocalHost(new URL(value).hostname);
+  } catch {
+    return false;
+  }
 }
 
 async function backendStatus(overrideConfig = config) {
@@ -737,13 +740,22 @@ async function backendStatus(overrideConfig = config) {
     }
     const response = await fetch(overrideConfig.healthUrl, { headers });
     if (!response.ok) {
-      return { ok: false, state: "offline", message: `HTTP ${response.status}` };
+      const authFailed = response.status === 401 || response.status === 403;
+      return {
+        ok: false,
+        reachable: true,
+        state: authFailed ? "error" : "offline",
+        message: authFailed ? "Backend authentication failed" : `HTTP ${response.status}`,
+        statusCode: response.status,
+        authFailed,
+      };
     }
     const body = await response.json();
     const modelLoaded = Boolean(body.model_loaded);
     const modelError = body.model_error ? String(body.model_error) : "";
     return {
       ok: true,
+      reachable: true,
       state: modelLoaded ? "ready" : modelError ? "error" : "starting",
       message: modelLoaded ? "Backend running" : modelError || "Backend starting",
       modelLoaded,
@@ -751,9 +763,13 @@ async function backendStatus(overrideConfig = config) {
       modelName: body.model_name,
       device: body.device,
       computeType: body.compute_type,
+      activeDevice: body.active_device,
+      activeComputeType: body.active_compute_type,
+      expectedModelPath: body.expected_model_path,
+      modelRetryAfterSeconds: body.model_retry_after_seconds,
     };
   } catch {
-    return { ok: false, state: "offline", message: "Backend offline" };
+    return { ok: false, reachable: false, state: "offline", message: "Backend offline", authFailed: false };
   }
 }
 
@@ -820,7 +836,11 @@ async function gpuMemoryStatus() {
 }
 
 async function startBackendIfNeeded() {
-  if (!config.autoStartBackend || await backendHealth()) {
+  if (!config.autoStartBackend) {
+    return;
+  }
+  const status = await backendStatus();
+  if (status.reachable || status.authFailed || !isLocalServiceUrl(config.healthUrl)) {
     return;
   }
   if (backendStartPromise) {
@@ -965,11 +985,13 @@ function pasteText(text, insertedMessage = "Inserted dictation") {
       clipboard.writeText(previousClipboardText);
     }
   };
+  let pasteTimeout;
   const finishPaste = (message = insertedMessage) => {
     if (finished) {
       return;
     }
     finished = true;
+    clearTimeout(pasteTimeout);
     showStatus("ready", message);
     setTimeout(() => {
       restoreClipboard();
@@ -977,12 +999,18 @@ function pasteText(text, insertedMessage = "Inserted dictation") {
   };
 
   pasteProcess.on("error", () => {
-    restoreClipboard();
-    showStatus("error", "Could not paste transcript");
+    clearTimeout(pasteTimeout);
+    showStatus("error", "Could not paste; transcript copied");
     finished = true;
   });
   pasteProcess.on("exit", () => finishPaste());
-  setTimeout(() => finishPaste("Inserted dictation"), 2500);
+  pasteTimeout = setTimeout(() => {
+    if (!finished) {
+      finished = true;
+      pasteProcess.kill();
+      showStatus("error", "Paste timed out; transcript copied");
+    }
+  }, 2500);
 }
 
 function fallbackStatusMessage(result) {

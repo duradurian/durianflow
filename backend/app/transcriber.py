@@ -7,7 +7,7 @@ import numpy as np
 
 from app.cuda_runtime import configure_cuda_dll_paths
 from app.config import Settings
-from app.model_store import resolve_model_source
+from app.model_store import expected_model_path, resolve_model_source
 from app.schemas import TranscriptSegment
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,8 @@ class WhisperTranscriber:
         self.device = self.settings.DEVICE
         self.compute_type = self.settings.COMPUTE_TYPE
         self.model_source = self.model_name
+        self.active_device = self.device
+        self.active_compute_type = self.compute_type
         self._model = None
         self.load_error: str | None = None
         self._segment_counter = itertools.count(1)
@@ -62,8 +64,15 @@ class WhisperTranscriber:
             except ImportError as exc:
                 raise RuntimeError("faster-whisper is not installed") from exc
 
-            model_source, local_files_only = resolve_model_source(self.settings)
+            try:
+                model_source, local_files_only = resolve_model_source(self.settings)
+            except Exception as exc:
+                self.load_error = str(exc)
+                raise
+
             self.model_source = model_source
+            self.active_device = self.device
+            self.active_compute_type = self.compute_type
             logger.info(
                 "Loading faster-whisper model %s on %s (%s)",
                 model_source,
@@ -76,17 +85,47 @@ class WhisperTranscriber:
                 "local_files_only": local_files_only,
             }
             if not local_files_only:
-                kwargs["download_root"] = self.settings.MODELS_DIR
+                kwargs["download_root"] = str(expected_model_path(self.settings).parent)
             try:
-                self._model = WhisperModel(model_source, **kwargs)
-                self.load_error = None
+                self._load_with_kwargs(WhisperModel, model_source, kwargs)
             except TypeError:
                 kwargs.pop("local_files_only", None)
-                self._model = WhisperModel(model_source, **kwargs)
-                self.load_error = None
+                self._load_with_kwargs(WhisperModel, model_source, kwargs)
             except Exception as exc:
+                if self._should_retry_on_cpu(exc):
+                    self._load_cpu_fallback(WhisperModel, model_source, local_files_only)
+                    return
                 self.load_error = str(exc)
                 raise
+
+    def _load_with_kwargs(self, model_class, model_source: str, kwargs: dict) -> None:
+        self._model = model_class(model_source, **kwargs)
+        self.active_device = str(kwargs.get("device", self.device))
+        self.active_compute_type = str(kwargs.get("compute_type", self.compute_type))
+        self.load_error = None
+
+    def _should_retry_on_cpu(self, exc: Exception) -> bool:
+        return (
+            self.device == "cuda"
+            and self.settings.FALLBACK_TO_CPU_ON_CUDA_ERROR
+            and isinstance(exc, RuntimeError)
+            and _is_cuda_runtime_error(exc)
+        )
+
+    def _load_cpu_fallback(self, model_class, model_source: str, local_files_only: bool) -> None:
+        logger.warning("CUDA model load failed; retrying on CPU with int8 compute")
+        kwargs = {
+            "device": "cpu",
+            "compute_type": "int8",
+            "local_files_only": local_files_only,
+        }
+        if not local_files_only:
+            kwargs["download_root"] = str(expected_model_path(self.settings).parent)
+        try:
+            self._load_with_kwargs(model_class, model_source, kwargs)
+        except TypeError:
+            kwargs.pop("local_files_only", None)
+            self._load_with_kwargs(model_class, model_source, kwargs)
 
     def transcribe(
         self,

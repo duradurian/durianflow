@@ -34,11 +34,13 @@ def is_loopback_host(host: str | None) -> bool:
 
 
 def configured_allowed_origins(settings: Settings) -> set[str]:
-    return {
-        origin.strip().rstrip("/")
-        for origin in settings.ALLOWED_ORIGINS.split(",")
-        if origin.strip()
-    }
+    origins = set()
+    for origin in settings.ALLOWED_ORIGINS.split(","):
+        value = origin.strip()
+        if not value:
+            continue
+        origins.add(value if value in LOCAL_ORIGINS else value.rstrip("/"))
+    return origins
 
 
 def is_valid_api_token(token: str | None, settings: Settings) -> bool:

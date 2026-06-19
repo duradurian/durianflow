@@ -59,6 +59,12 @@ def test_server_mode_does_not_allow_local_origins_by_default() -> None:
     assert not is_allowed_origin("null", settings, allow_local_origins=False)
 
 
+def test_server_mode_allows_explicit_file_origin() -> None:
+    settings = Settings(_env_file=None, ALLOWED_ORIGINS="file://,null")
+    assert is_allowed_origin("file://", settings, allow_local_origins=False)
+    assert is_allowed_origin("null", settings, allow_local_origins=False)
+
+
 def test_http_token_dependency_rejects_missing_token(monkeypatch) -> None:
     monkeypatch.setattr(app_settings, "REQUIRE_API_TOKEN", True)
     monkeypatch.setattr(app_settings, "API_TOKEN", "secret")
@@ -114,3 +120,25 @@ def test_health_reports_model_load_diagnostics(monkeypatch, tmp_path) -> None:
     assert response.expected_model_path is not None
     assert response.expected_model_path.endswith("missing-model")
     assert response.model_retry_after_seconds is not None
+
+
+def test_health_retry_uses_configured_cooldown(monkeypatch) -> None:
+    def source_is_available(_settings):
+        return ("tiny", False)
+
+    async def fail_load():
+        main_module.model_load_error = "retry failed"
+        main_module.model_load_retry_after = main_module.monotonic() + main_module.model_load_retry_seconds()
+
+    monkeypatch.setattr(app_settings, "MODEL_LOAD_RETRY_SECONDS", 7)
+    monkeypatch.setattr(main_module.transcriber, "_model", None)
+    monkeypatch.setattr(main_module, "model_load_error", "previous failure")
+    monkeypatch.setattr(main_module, "model_load_retry_after", main_module.monotonic() - 1)
+    monkeypatch.setattr(main_module, "resolve_model_source", source_is_available)
+    monkeypatch.setattr(main_module, "try_load_model", fail_load)
+
+    response = asyncio.run(health())
+    assert response.status == "degraded"
+    assert response.model_error == "retry failed"
+    assert response.model_retry_after_seconds is not None
+    assert response.model_retry_after_seconds <= 7

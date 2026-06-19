@@ -70,6 +70,8 @@ class HealthResponse(BaseModel):
     model_retry_after_seconds: int | None = None
     device: str
     compute_type: str
+    active_device: str | None = None
+    active_compute_type: str | None = None
 
 
 class ModelsResponse(BaseModel):

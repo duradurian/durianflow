@@ -33,7 +33,7 @@ The NVIDIA Docker setup avoids this host DLL problem by using a CUDA/cuDNN runti
 
 ## Model Missing
 
-Normal startup does not download Whisper models. Run `python scripts/install_model.py large-v3-turbo` from `backend/`, or set `MODEL_PATH` to an existing faster-whisper model directory.
+With `ALLOW_MODEL_DOWNLOAD=true`, startup can download and cache the configured Whisper model. If downloads are disabled or blocked, run `python scripts/install_model.py large-v3-turbo` from `backend/`, or set `MODEL_PATH` to an existing faster-whisper model directory.
 
 ## Backend Rejects Remote URLs
 

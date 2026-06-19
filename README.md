@@ -54,14 +54,14 @@ Then:
 4. Press `Ctrl+Alt+Space` again, or release it if hold mode is enabled.
 5. Openflow pastes the finalized transcript into the focused textbox.
 
-Before the first transcription, install the configured Whisper model once:
+Before the first transcription, Openflow can download and cache the configured Whisper model automatically. To preinstall it explicitly:
 
 ```powershell
 cd backend
 python scripts/install_model.py large-v3-turbo
 ```
 
-Normal backend startup does not download models. If the model is missing, `/health` reports the setup error.
+If `ALLOW_MODEL_DOWNLOAD=false` is set and the model is missing, `/health` reports the setup error instead of downloading.
 
 If PowerShell blocks `npm.ps1`, use the command shim:
 
@@ -205,7 +205,7 @@ Backend settings are loaded from `backend/.env`. Important defaults:
 MODEL_NAME=large-v3-turbo
 MODELS_DIR=./models
 MODEL_PATH=
-ALLOW_MODEL_DOWNLOAD=false
+ALLOW_MODEL_DOWNLOAD=true
 HOST=127.0.0.1
 OPENFLOW_SERVER_MODE=false
 DEVICE=cuda
@@ -221,6 +221,7 @@ API_TOKEN=
 ```
 
 Set `OPENFLOW_SERVER_MODE=true`, `REQUIRE_API_TOKEN=true`, and `API_TOKEN=...` only when intentionally exposing the backend outside local desktop mode.
+For fully offline startup, preinstall a model with `scripts/install_model.py` and set `ALLOW_MODEL_DOWNLOAD=false`.
 For remote browser clients, also set `ALLOWED_ORIGINS` to the exact client origins that may open the WebSocket.
 
 ## Local LLM Refinement

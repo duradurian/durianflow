@@ -48,3 +48,10 @@ def test_resolve_model_source_allows_explicit_download(tmp_path: Path) -> None:
     source, local_only = resolve_model_source(settings)
     assert source == "tiny"
     assert local_only is False
+
+
+def test_resolve_model_source_allows_download_by_default(tmp_path: Path) -> None:
+    settings = Settings(_env_file=None, MODELS_DIR=str(tmp_path), MODEL_NAME="tiny")
+    source, local_only = resolve_model_source(settings)
+    assert source == "tiny"
+    assert local_only is False
