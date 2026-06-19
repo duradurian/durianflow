@@ -126,19 +126,14 @@ def test_health_retry_uses_configured_cooldown(monkeypatch) -> None:
     def source_is_available(_settings):
         return ("tiny", False)
 
-    async def fail_load():
-        main_module.model_load_error = "retry failed"
-        main_module.model_load_retry_after = main_module.monotonic() + main_module.model_load_retry_seconds()
-
     monkeypatch.setattr(app_settings, "MODEL_LOAD_RETRY_SECONDS", 7)
     monkeypatch.setattr(main_module.transcriber, "_model", None)
+    monkeypatch.setattr(main_module, "model_load_task", None)
     monkeypatch.setattr(main_module, "model_load_error", "previous failure")
     monkeypatch.setattr(main_module, "model_load_retry_after", main_module.monotonic() - 1)
     monkeypatch.setattr(main_module, "resolve_model_source", source_is_available)
-    monkeypatch.setattr(main_module, "try_load_model", fail_load)
 
     response = asyncio.run(health())
     assert response.status == "degraded"
-    assert response.model_error == "retry failed"
-    assert response.model_retry_after_seconds is not None
-    assert response.model_retry_after_seconds <= 7
+    assert response.model_loading is True
+    assert response.model_retry_after_seconds is None

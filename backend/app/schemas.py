@@ -63,6 +63,7 @@ class HealthResponse(BaseModel):
     status: Literal["ok", "degraded"]
     app: str
     model_loaded: bool
+    model_loading: bool = False
     model_error: str | None = None
     model_name: str
     model_source: str | None = None

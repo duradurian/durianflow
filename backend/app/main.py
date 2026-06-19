@@ -20,6 +20,7 @@ transcriber = WhisperTranscriber(settings)
 transcription_semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_TRANSCRIPTIONS)
 model_load_error: str | None = None
 model_load_retry_after: float = 0.0
+model_load_task: asyncio.Task | None = None
 
 
 def model_load_retry_seconds() -> float:
@@ -27,15 +28,27 @@ def model_load_retry_seconds() -> float:
 
 
 def model_retry_after_seconds() -> int | None:
-    if transcriber.model_loaded or not model_load_error:
+    if transcriber.model_loaded or is_model_loading() or not model_load_error:
         return None
     remaining = int(max(0.0, model_load_retry_after - monotonic()))
     return remaining
 
 
+def is_model_loading() -> bool:
+    return model_load_task is not None and not model_load_task.done()
+
+
+def start_model_load_task() -> None:
+    global model_load_task
+    if transcriber.model_loaded or is_model_loading():
+        return
+    model_load_task = asyncio.create_task(try_load_model())
+
+
 async def try_load_model() -> None:
     global model_load_error, model_load_retry_after
     previous_error = model_load_error
+    model_load_error = None
     try:
         await asyncio.to_thread(transcriber.load)
         model_load_error = None
@@ -52,7 +65,7 @@ async def try_load_model() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_runtime_security(settings)
-    await try_load_model()
+    start_model_load_task()
     yield
 
 
@@ -73,19 +86,23 @@ def require_http_api_token(
 @app.get("/health", response_model=HealthResponse, dependencies=[Depends(require_http_api_token)])
 async def health() -> HealthResponse:
     global model_load_error, model_load_retry_after
-    if not transcriber.model_loaded and model_load_error and monotonic() >= model_load_retry_after:
-        try:
-            resolve_model_source(settings)
-        except Exception as exc:
-            model_load_error = str(exc)
-            model_load_retry_after = monotonic() + model_load_retry_seconds()
-        else:
-            await try_load_model()
+    if not transcriber.model_loaded and not is_model_loading():
+        if model_load_error and monotonic() >= model_load_retry_after:
+            try:
+                resolve_model_source(settings)
+            except Exception as exc:
+                model_load_error = str(exc)
+                model_load_retry_after = monotonic() + model_load_retry_seconds()
+            else:
+                start_model_load_task()
+        elif not model_load_error:
+            start_model_load_task()
 
     return HealthResponse(
         status="ok" if transcriber.model_loaded else "degraded",
         app=settings.APP_NAME,
         model_loaded=transcriber.model_loaded,
+        model_loading=is_model_loading(),
         model_error=model_load_error,
         model_name=settings.MODEL_NAME,
         model_source=transcriber.model_source if transcriber.model_loaded else None,

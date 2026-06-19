@@ -9,6 +9,7 @@ Returns backend and model status.
   "status": "ok",
   "app": "openflow-backend",
   "model_loaded": true,
+  "model_loading": false,
   "model_error": null,
   "model_name": "large-v3-turbo",
   "model_source": "models/large-v3-turbo",
