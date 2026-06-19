@@ -16,6 +16,7 @@ class StartMessage(BaseModel):
     format: AudioFormat = "pcm_s16le"
     language: str | None = "en"
     mode: TranscriptionMode = "fast"
+    api_token: str | None = Field(default=None, exclude=True)
 
 
 class StopMessage(BaseModel):
@@ -64,6 +65,9 @@ class HealthResponse(BaseModel):
     model_loaded: bool
     model_error: str | None = None
     model_name: str
+    model_source: str | None = None
+    expected_model_path: str | None = None
+    model_retry_after_seconds: int | None = None
     device: str
     compute_type: str
 

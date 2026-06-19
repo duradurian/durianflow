@@ -7,7 +7,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket
 
 from app.config import Settings, get_settings
 from app.logging_config import configure_logging
-from app.model_store import resolve_model_source
+from app.model_store import expected_model_path, resolve_model_source
 from app.schemas import AVAILABLE_MODELS, HealthResponse, ModelsResponse
 from app.security import bearer_token, is_valid_api_token, validate_runtime_security
 from app.transcriber import WhisperTranscriber
@@ -20,19 +20,33 @@ transcriber = WhisperTranscriber(settings)
 transcription_semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_TRANSCRIPTIONS)
 model_load_error: str | None = None
 model_load_retry_after: float = 0.0
-MODEL_LOAD_RETRY_SECONDS = 30.0
+
+
+def model_load_retry_seconds() -> float:
+    return max(0.0, float(settings.MODEL_LOAD_RETRY_SECONDS))
+
+
+def model_retry_after_seconds() -> int | None:
+    if transcriber.model_loaded or not model_load_error:
+        return None
+    remaining = int(max(0.0, model_load_retry_after - monotonic()))
+    return remaining
 
 
 async def try_load_model() -> None:
     global model_load_error, model_load_retry_after
+    previous_error = model_load_error
     try:
         await asyncio.to_thread(transcriber.load)
         model_load_error = None
         model_load_retry_after = 0.0
     except Exception:
         model_load_error = transcriber.load_error or "Model load failed"
-        model_load_retry_after = monotonic() + MODEL_LOAD_RETRY_SECONDS
-        logger.exception("Model load failed; /health will report model_loaded=false")
+        model_load_retry_after = monotonic() + model_load_retry_seconds()
+        if model_load_error != previous_error:
+            logger.exception("Model load failed; /health will report model_loaded=false")
+        else:
+            logger.warning("Model load still failing; /health will report model_loaded=false: %s", model_load_error)
 
 
 @asynccontextmanager
@@ -74,6 +88,9 @@ async def health() -> HealthResponse:
         model_loaded=transcriber.model_loaded,
         model_error=model_load_error,
         model_name=settings.MODEL_NAME,
+        model_source=transcriber.model_source if transcriber.model_loaded else None,
+        expected_model_path=str(expected_model_path(settings)),
+        model_retry_after_seconds=model_retry_after_seconds(),
         device=settings.DEVICE,
         compute_type=settings.COMPUTE_TYPE,
     )

@@ -99,3 +99,18 @@ def test_health_does_not_retry_model_load_before_cooldown(monkeypatch) -> None:
     response = asyncio.run(health())
     assert response.status == "degraded"
     assert response.model_error == "previous failure"
+
+
+def test_health_reports_model_load_diagnostics(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(app_settings, "MODELS_DIR", str(tmp_path))
+    monkeypatch.setattr(app_settings, "MODEL_NAME", "missing-model")
+    monkeypatch.setattr(app_settings, "MODEL_PATH", None)
+    monkeypatch.setattr(main_module.transcriber, "_model", None)
+    monkeypatch.setattr(main_module, "model_load_error", "previous failure")
+    monkeypatch.setattr(main_module, "model_load_retry_after", main_module.monotonic() + 60)
+
+    response = asyncio.run(health())
+    assert response.status == "degraded"
+    assert response.expected_model_path is not None
+    assert response.expected_model_path.endswith("missing-model")
+    assert response.model_retry_after_seconds is not None

@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     API_TOKEN: str | None = None
     ALLOWED_ORIGINS: str = ""
     MAX_CONCURRENT_TRANSCRIPTIONS: int = 1
+    MODEL_LOAD_RETRY_SECONDS: int = 30
     VAD_ENERGY_THRESHOLD: float = Field(default=0.01, gt=0)
     VAD_MIN_SPEECH_MS: int = 120
 
