@@ -254,7 +254,7 @@ Authentication failures close the socket with policy violation code `1008` after
 Running `npm start` from `desktop/` launches Electron. The desktop app then:
 
 1. Loads local desktop config.
-2. Registers the configured hotkey. On Windows, toggle mode falls back to a physical key-state watcher if Electron cannot claim the shortcut.
+2. Confirms the configured hotkey is registered. On Windows, toggle mode falls back to a physical key-state watcher if Electron cannot claim the shortcut.
 3. Starts the backend automatically when the configured health URL is local and unreachable.
 4. Does not spawn another backend if `/health` is reachable but the model is still loading or degraded.
 5. Shows model preparation status and waits for `model_loaded=true` before starting microphone capture.
