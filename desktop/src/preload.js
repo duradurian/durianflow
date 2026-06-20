@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld("openflow", {
   getAppStatus: () => ipcRenderer.invoke("app-status:get"),
   beginHotkeyCapture: () => ipcRenderer.invoke("hotkey-capture:start"),
   endHotkeyCapture: () => ipcRenderer.invoke("hotkey-capture:end"),
+  onHotkeyCaptureCancelled: (callback) => ipcRenderer.on("hotkey-capture:cancelled", () => callback()),
   fitSettingsWindow: (size) => ipcRenderer.invoke("settings-window:fit", size),
   onRemeasureSettingsWindow: (callback) => ipcRenderer.on("settings-window:remeasure", () => callback()),
 });

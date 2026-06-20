@@ -57,8 +57,10 @@ let advancedSettingsWindow;
 let tray;
 let backendProcess;
 let backendStartPromise;
-let holdWatcherProcess;
+let hotkeyWatcherProcess;
 let isRecording = false;
+let isStartingDictation = false;
+let cancelStartingDictation = false;
 let isQuitting = false;
 let isCapturingHotkey = false;
 let llmLoadState = { key: "", state: "off", provider: "", baseUrl: "", model: "" };
@@ -334,7 +336,7 @@ function createTrayIcon() {
 }
 
 function setTrayMenu() {
-  const label = isRecording ? "Stop" : "Dictate";
+  const label = isRecording || isStartingDictation ? "Stop" : "Dictate";
   tray.setContextMenu(Menu.buildFromTemplate([
     { label, click: toggleDictation },
     { label: "Settings", click: openSettingsWindow },
@@ -467,6 +469,9 @@ function createSettingsWindow() {
   settingsWindow.on("close", (event) => {
     if (!isQuitting) {
       event.preventDefault();
+      if (isCapturingHotkey) {
+        settingsWindow.webContents.send("hotkey-capture:cancelled");
+      }
       endHotkeyCapture();
       settingsWindow.hide();
     }
@@ -572,16 +577,16 @@ function showStatus(state, message, sticky = false) {
   }
 }
 
-function stopHoldWatcher() {
-  if (holdWatcherProcess) {
-    holdWatcherProcess.kill();
-    holdWatcherProcess = null;
+function stopHotkeyWatcher() {
+  if (hotkeyWatcherProcess) {
+    hotkeyWatcherProcess.kill();
+    hotkeyWatcherProcess = null;
   }
 }
 
 function stopShortcutRegistration() {
   globalShortcut.unregisterAll();
-  stopHoldWatcher();
+  stopHotkeyWatcher();
 }
 
 function keyToVirtualKey(key) {
@@ -637,15 +642,21 @@ function acceleratorToVirtualKeys(accelerator) {
     .filter((key) => Number.isInteger(key));
 }
 
-function startHoldWatcher() {
+function startKeyStateWatcher(mode) {
+  const isHoldMode = mode === "hold";
   if (process.platform !== "win32") {
-    showStatus("error", "Hold mode is currently available on Windows only", true);
+    if (isHoldMode) {
+      showStatus("error", "Hold mode is currently available on Windows only", true);
+    }
     return false;
   }
 
+  const parts = acceleratorParts(config.hotkey);
   const keys = acceleratorToVirtualKeys(config.hotkey);
-  if (!keys.length || keys.length !== config.hotkey.split("+").length) {
-    showStatus("error", `Unsupported hold hotkey: ${config.hotkey}`, true);
+  if (!keys.length || keys.length !== parts.length) {
+    if (isHoldMode) {
+      showStatus("error", `Unsupported hold hotkey: ${config.hotkey}`, true);
+    }
     return false;
   }
 
@@ -680,23 +691,36 @@ while ($true) {
   Start-Sleep -Milliseconds 35
 }`;
 
-  holdWatcherProcess = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
+  const watcher = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
     windowsHide: true,
     stdio: ["ignore", "pipe", "ignore"],
   });
+  hotkeyWatcherProcess = watcher;
 
-  holdWatcherProcess.stdout.on("data", (chunk) => {
+  watcher.stdout.on("data", (chunk) => {
     for (const line of chunk.toString().split(/\r?\n/)) {
       if (line.trim() === "DOWN") {
-        startDictation();
-      } else if (line.trim() === "UP") {
+        if (isHoldMode) {
+          startDictation();
+        } else {
+          toggleDictation();
+        }
+      } else if (line.trim() === "UP" && isHoldMode) {
         stopDictation();
       }
     }
   });
 
-  holdWatcherProcess.on("exit", () => {
-    holdWatcherProcess = null;
+  watcher.on("error", () => {
+    if (hotkeyWatcherProcess === watcher) {
+      hotkeyWatcherProcess = null;
+      showStatus("error", `Could not monitor hotkey: ${config.hotkey}`, true);
+    }
+  });
+  watcher.on("exit", () => {
+    if (hotkeyWatcherProcess === watcher) {
+      hotkeyWatcherProcess = null;
+    }
   });
 
   return true;
@@ -709,14 +733,18 @@ function applyShortcutRegistration() {
   }
 
   if (config.inputBehavior === "hold") {
-    return startHoldWatcher();
+    return startKeyStateWatcher("hold");
   }
 
   const ok = globalShortcut.register(config.hotkey, toggleDictation);
-  if (!ok) {
-    showStatus("error", `Could not register hotkey: ${config.hotkey}`, true);
+  if (ok) {
+    return true;
   }
-  return ok;
+  if (startKeyStateWatcher("toggle")) {
+    return true;
+  }
+  showStatus("error", `Could not register hotkey: ${config.hotkey}`, true);
+  return false;
 }
 
 function endHotkeyCapture() {
@@ -752,6 +780,7 @@ async function backendStatus(overrideConfig = config) {
     }
     const body = await response.json();
     const modelLoaded = Boolean(body.model_loaded);
+    const modelLoading = Boolean(body.model_loading);
     const modelError = body.model_error ? String(body.model_error) : "";
     return {
       ok: true,
@@ -759,6 +788,7 @@ async function backendStatus(overrideConfig = config) {
       state: modelLoaded ? "ready" : modelError ? "error" : "starting",
       message: modelLoaded ? "Backend running" : modelError || "Backend starting",
       modelLoaded,
+      modelLoading,
       modelError,
       modelName: body.model_name,
       device: body.device,
@@ -773,11 +803,14 @@ async function backendStatus(overrideConfig = config) {
   }
 }
 
-async function waitForBackendReady(timeoutMs = 45000) {
+async function waitForBackendReady(timeoutMs = 10 * 60 * 1000, shouldCancel = () => false, onWaiting = () => {}) {
   const started = Date.now();
   let lastStatus = { ok: false, state: "offline", message: "Backend offline" };
 
   while (Date.now() - started < timeoutMs) {
+    if (shouldCancel()) {
+      return { ...lastStatus, cancelled: true };
+    }
     lastStatus = await backendStatus();
     if (lastStatus.ok && lastStatus.modelLoaded) {
       return lastStatus;
@@ -785,6 +818,10 @@ async function waitForBackendReady(timeoutMs = 45000) {
     if (lastStatus.ok && lastStatus.modelError) {
       return lastStatus;
     }
+    if (lastStatus.authFailed) {
+      return lastStatus;
+    }
+    onWaiting(lastStatus);
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
@@ -897,30 +934,60 @@ async function startDictation() {
   if (!recorderWindow || recorderWindow.isDestroyed()) {
     return;
   }
-  if (isRecording || isCapturingHotkey) {
+  if (isRecording || isStartingDictation || isCapturingHotkey) {
     return;
   }
 
-  isRecording = true;
+  isStartingDictation = true;
+  cancelStartingDictation = false;
   setTrayMenu();
-  showStatus("recording", "Listening...", true);
-  await startBackendIfNeeded();
-  if (!isRecording) {
-    return;
-  }
   showStatus("transcribing", "Starting backend...", true);
-  const status = await waitForBackendReady();
-  if (!status.ok || !status.modelLoaded) {
-    isRecording = false;
+
+  try {
+    await startBackendIfNeeded();
+    if (cancelStartingDictation) {
+      return;
+    }
+
+    const status = await waitForBackendReady(
+      10 * 60 * 1000,
+      () => cancelStartingDictation,
+      (nextStatus) => {
+        if (nextStatus.modelLoading) {
+          showStatus("transcribing", `Preparing ${nextStatus.modelName || "speech model"}...`, true);
+        } else if (nextStatus.reachable) {
+          showStatus("transcribing", "Starting backend...", true);
+        }
+      },
+    );
+    if (status.cancelled || cancelStartingDictation) {
+      return;
+    }
+    if (!status.ok || !status.modelLoaded) {
+      showStatus("error", status.modelError || status.message || "Backend is not ready");
+      return;
+    }
+
+    isRecording = true;
     setTrayMenu();
-    showStatus("error", status.message || "Backend is not ready");
-    return;
+    showStatus("recording", "Listening...", true);
+    recorderWindow.webContents.send("dictation:start", config);
+  } finally {
+    const wasCancelled = cancelStartingDictation;
+    isStartingDictation = false;
+    cancelStartingDictation = false;
+    setTrayMenu();
+    if (wasCancelled && !isRecording) {
+      showStatus("ready", `Ready: ${config.hotkey}`);
+    }
   }
-  showStatus("recording", "Listening...", true);
-  recorderWindow.webContents.send("dictation:start", config);
 }
 
 function stopDictation() {
+  if (isStartingDictation) {
+    cancelStartingDictation = true;
+    return;
+  }
   if (!isRecording) {
     return;
   }
@@ -931,7 +998,7 @@ function stopDictation() {
 }
 
 function toggleDictation() {
-  if (isRecording) {
+  if (isRecording || isStartingDictation) {
     stopDictation();
   } else {
     startDictation();
@@ -1109,11 +1176,12 @@ trustedHandle("config:save", (_event, nextConfig) => {
 
   config = next;
   let hotkeyRegistered = hotkeySafe;
+  let restoredHotkeyRegistered = true;
   if (shortcutChanged) {
     hotkeyRegistered = hotkeySafe && applyShortcutRegistration();
     if (!hotkeyRegistered) {
       config = previousConfig;
-      applyShortcutRegistration();
+      restoredHotkeyRegistered = applyShortcutRegistration();
     }
   }
 
@@ -1123,7 +1191,11 @@ trustedHandle("config:save", (_event, nextConfig) => {
   setTrayMenu();
   showStatus(
     hotkeyRegistered ? "ready" : "error",
-    hotkeyRegistered ? "Settings saved" : "Use a shortcut with a modifier, or a function key such as F8",
+    hotkeyRegistered
+      ? "Settings saved"
+      : restoredHotkeyRegistered
+        ? "Hotkey unavailable; previous shortcut restored"
+        : "Could not register a hotkey",
     !hotkeyRegistered,
   );
 
@@ -1131,6 +1203,7 @@ trustedHandle("config:save", (_event, nextConfig) => {
     config,
     configPath: configPath(),
     hotkeyRegistered,
+    restoredHotkeyRegistered,
   };
 });
 
@@ -1165,6 +1238,7 @@ trustedHandle("app-status:get", async () => {
   const status = await backendStatus();
   return {
     isRecording,
+    isStartingDictation,
     isBackendProcessManaged: Boolean(backendProcess),
     backend: status,
     llm: llmStatus(config),
@@ -1193,10 +1267,12 @@ app.whenReady().then(async () => {
   tray.on("double-click", openSettingsWindow);
   setTrayMenu();
 
-  applyShortcutRegistration();
+  const hotkeyRegistered = applyShortcutRegistration();
   await startBackendIfNeeded();
   preloadConfiguredLlmInBackground(config);
-  showStatus("ready", `Ready: ${config.hotkey}`);
+  if (hotkeyRegistered) {
+    showStatus("ready", `Ready: ${config.hotkey}`);
+  }
 });
 
 app.on("window-all-closed", () => {});

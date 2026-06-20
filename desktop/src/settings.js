@@ -338,7 +338,11 @@ async function loadDevices(selectedDeviceId) {
 async function refreshAppStatus() {
   try {
     const status = await window.openflow.getAppStatus();
-    setState(recordingState, status.isRecording ? "Listening" : "Idle", status.isRecording ? "ok" : "");
+    setState(
+      recordingState,
+      status.isRecording ? "Listening" : status.isStartingDictation ? "Preparing" : "Idle",
+      status.isRecording ? "ok" : "",
+    );
 
     if (status.backend.ok) {
       setState(backendState, status.backend.message || "Running", "ok");
@@ -413,8 +417,12 @@ async function endHotkeyRecording() {
   isRecordingHotkey = false;
   setHotkeyCaptureControlsDisabled(false);
   hotkeyButton.classList.remove("recording");
-  await window.openflow.endHotkeyCapture();
+  const result = await window.openflow.endHotkeyCapture();
+  if (!result.ok) {
+    setMessage(`Could not restore hotkey: ${recordedHotkey}`, "error");
+  }
   updateDirtyState();
+  return result;
 }
 
 async function handleCapturedHotkey(accelerator) {
@@ -580,6 +588,17 @@ advancedSettingsButton.addEventListener("click", () => {
 
 window.openflow.onConfigUpdated((nextConfig) => {
   writeFormConfig(nextConfig, true);
+});
+window.openflow.onHotkeyCaptureCancelled(() => {
+  if (!isRecordingHotkey) {
+    return;
+  }
+  setRecordedHotkey(hotkeyBeforeCapture);
+  isRecordingHotkey = false;
+  setHotkeyCaptureControlsDisabled(false);
+  hotkeyButton.classList.remove("recording");
+  setMessage("Hotkey recording cancelled.");
+  updateDirtyState();
 });
 window.openflow.onLlmStatusUpdated((status) => {
   setLlmStatus(status);

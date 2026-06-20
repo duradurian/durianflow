@@ -254,9 +254,11 @@ Authentication failures close the socket with policy violation code `1008` after
 Running `npm start` from `desktop/` launches Electron. The desktop app then:
 
 1. Loads local desktop config.
-2. Starts the backend automatically when the configured health URL is local and unreachable.
-3. Does not spawn another backend if `/health` is reachable but the model is still loading or degraded.
-4. Waits for `model_loaded=true` before starting dictation.
-5. Sends the backend API token in the WebSocket `start` message when configured.
+2. Registers the configured hotkey. On Windows, toggle mode falls back to a physical key-state watcher if Electron cannot claim the shortcut.
+3. Starts the backend automatically when the configured health URL is local and unreachable.
+4. Does not spawn another backend if `/health` is reachable but the model is still loading or degraded.
+5. Shows model preparation status and waits for `model_loaded=true` before starting microphone capture.
+6. Lets a second toggle press, or a hold-key release, cancel a pending model-preparation attempt.
+7. Sends the backend API token in the WebSocket `start` message when configured.
 
 If the model is missing and downloads are allowed, the backend downloads/caches it in the background. If downloads are blocked or disabled, `/health` remains reachable with `status=degraded` and a `model_error` explaining the setup issue.
