@@ -36,7 +36,7 @@ class WhisperTranscriber:
                 MODEL_NAME=model_name,
                 DEVICE=device or "cpu",
                 COMPUTE_TYPE=compute_type or "int8",
-                ALLOW_MODEL_DOWNLOAD=True,
+                ALLOW_MODEL_DOWNLOAD=False,
             )
         self.model_name = self.settings.MODEL_NAME
         self.device = self.settings.DEVICE

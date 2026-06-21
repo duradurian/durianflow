@@ -19,7 +19,7 @@ class FakeTranscriber:
 
 def make_session() -> TranscriptionSession:
     return TranscriptionSession(
-        session_id="test",
+        session_id="11111111-1111-4111-8111-111111111111",
         sample_rate=16000,
         channels=1,
         language="en",
@@ -61,7 +61,7 @@ def test_stop_finalizes_active_speech() -> None:
 def test_session_caps_long_continuous_speech() -> None:
     async def run() -> None:
         session = TranscriptionSession(
-            session_id="test",
+            session_id="11111111-1111-4111-8111-111111111111",
             sample_rate=16000,
             channels=1,
             language="en",

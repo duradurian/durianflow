@@ -84,7 +84,7 @@ class TranscriptionSession:
             )
             partial = await self._maybe_partial()
             if partial:
-                events.append(partial.model_dump())
+                events.append(partial.model_dump(mode="json"))
             if samples_to_seconds(len(self.speech_buffer), self.sample_rate) >= self.settings.MAX_BUFFER_SECONDS:
                 events.append(
                     StatusEvent(status="speech_ended", message="Maximum utterance length reached.").model_dump()
@@ -92,7 +92,7 @@ class TranscriptionSession:
                 events.append(StatusEvent(status="transcribing").model_dump())
                 final = await self._finalize_current_speech()
                 if final:
-                    events.append(final.model_dump())
+                    events.append(final.model_dump(mode="json"))
         elif len(self.speech_buffer) > 0:
             pad = min(len(frame), self.speech_pad_remaining_samples)
             if pad > 0:
@@ -104,7 +104,7 @@ class TranscriptionSession:
             events.append(StatusEvent(status="transcribing").model_dump())
             final = await self._finalize_current_speech()
             if final:
-                events.append(final.model_dump())
+                events.append(final.model_dump(mode="json"))
 
         return events
 
@@ -115,7 +115,7 @@ class TranscriptionSession:
             events.append(StatusEvent(status="transcribing").model_dump())
             final = await self._finalize_current_speech()
             if final:
-                events.append(final.model_dump())
+                events.append(final.model_dump(mode="json"))
         elif self.current_partial is not None:
             events.append(self._promote_current_partial().model_dump())
         events.append(StatusEvent(status="stopped").model_dump())

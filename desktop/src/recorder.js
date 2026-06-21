@@ -8,7 +8,6 @@ let sourceNode = null;
 let processorNode = null;
 let muteNode = null;
 let isStopping = false;
-let isCompleting = false;
 let pendingAudio = 0;
 let finalSegments = [];
 let latestPartial = "";
@@ -74,23 +73,16 @@ function reset() {
 }
 
 function complete() {
-  if (isCompleting) return;
-  isCompleting = true;
-  const text = transcriptText();
+  // Main owns completion and clipboard writes.  The recorder only releases
+  // capture resources after the trusted worker reports a terminal status.
   reset();
-  window.durianflow.completeDictation(text);
-  isCompleting = false;
 }
 
-function fail(message) {
-  if (isCompleting) return;
-  isCompleting = true;
-  // Failure may originate in the renderer (for example a rejected IPC call),
-  // so ensure a live main-process session does not retain queued audio.
+function fail() {
+  // The renderer may cancel capture, but it cannot choose a main-process
+  // status, error message, or completion text.
   try { dictationApi().cancel().catch(() => {}); } catch {}
   reset();
-  window.durianflow.failDictation(message || "Dictation failed");
-  isCompleting = false;
 }
 
 function listen() {
@@ -103,9 +95,9 @@ function listen() {
     api.onStatus((event = {}) => {
       if (event.state === "stopped" || event.status === "stopped") complete();
     }),
-    api.onError((event = {}) => fail(event.message || event.code || "Transcription error")),
+    api.onError(() => fail()),
     api.onModelState((event = {}) => {
-      if (event.state === "error") fail(event.message || "Transcription model unavailable");
+      if (event.state === "error") fail();
     }),
   ];
 }
@@ -130,7 +122,7 @@ async function startAudio(config) {
         // The bounded main-process queue rejected this frame. Dropping newest
         // audio is intentional; never let renderer callbacks accumulate.
       }
-    }).catch((error) => fail(error.message || "Could not send audio to dictation service"))
+    }).catch(() => fail())
       .finally(() => { pendingAudio = Math.max(0, pendingAudio - 1); });
   };
   sourceNode.connect(processorNode);
@@ -159,14 +151,13 @@ async function start(config = {}) {
     }
     sessionStarted = true;
     await startAudio(config);
-    window.durianflow.reportStatus("recording", "Listening...", true);
   } catch (error) {
     if (sessionStarted) {
       // A microphone permission/device failure happens after main has created a
       // session. Release it without delaying the user-visible error.
       dictationApi().cancel().catch(() => {});
     }
-    fail(error.message || "Could not start dictation");
+    fail();
   }
 }
 
@@ -176,12 +167,10 @@ async function stop() {
   stopAudio();
   try {
     await dictationApi().stop();
-  } catch (error) {
-    fail(error.message || "Could not stop dictation");
+  } catch {
+    fail();
     return;
   }
-  clearTimeout(stopTimer);
-  stopTimer = setTimeout(complete, 5000);
 }
 
 window.durianflow.onStartDictation?.(start);

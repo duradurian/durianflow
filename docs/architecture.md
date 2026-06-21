@@ -6,17 +6,21 @@ Durianflow is a Windows push-to-talk dictation application. Its local path is ma
 
 ```mermaid
 flowchart LR
-  User[User / focused application] --> Main[Electron main]
+  User[User / focused application] --> Main[Electron main\nsession controller]
   Main -->|fixed IPC| Preload[preload/contextBridge]
   Preload --> Recorder[Sandboxed recorder renderer]
   Recorder -->|PCM16 chunks| Preload
   Preload --> Main
-  Main -->|bounded framed stdio| Worker[Python transcription worker]
+  Main --> Transport[Bounded worker transport\nand supervisor]
+  Transport -->|bounded framed stdio| Worker[Fixed Python sidecar]
   Worker --> Core[Session / VAD / faster-whisper]
+  Official[Release-controlled\nmodel metadata] --> Store[Official model store]
+  Custom[Config-file custom model opt-in] -. contained root .-> Store
+  Store --> Core
   Core --> Worker
   Worker -->|status / partial / final| Main
   Main --> Preload
-  Main -->|refine and paste| User
+  Main -->|refine, copy, and guarded paste| User
 ```
 
 The recorder has no backend URL, API token, raw IPC primitive, or network connection. It captures and downsamples audio to mono PCM16 at 16 kHz, then uses the narrow `window.durianflow.dictation` bridge.
@@ -25,13 +29,13 @@ The recorder has no backend URL, API token, raw IPC primitive, or network connec
 
 | Component | Responsibility |
 | --- | --- |
-| `desktop/src/main.js` | Hotkey, tray, dictation lifecycle, IPC validation, worker launch, transcript routing, LLM refinement, clipboard/paste. |
+| `desktop/src/main.js` | Hotkey, tray, main-owned dictation lifecycle, IPC validation, worker launch, transcript routing, LLM refinement, and guarded clipboard completion. |
 | `desktop/src/preload.js` | Fixed contextBridge APIs and event subscriptions; no generic IPC access. |
 | `desktop/src/recorder.js` | Microphone capture, PCM conversion, bounded pending sends, and local transcript UX. |
-| `desktop/src/worker_supervisor.js` | Python child-process lifecycle, bounded framed I/O, stderr ring buffer, readiness timeout, and shutdown. |
+| `desktop/src/worker_supervisor.js` | Fixed-sidecar child-process lifecycle, bounded framed I/O, stderr ring buffer, response deadlines, process-tree termination, and shutdown. |
 | `desktop/src/local_worker_transport.js` | Session/generation tracking, worker credits, and `start`/`audio`/`stop`/`cancel` commands. |
 | `backend/app/worker.py` | Async model load, command intake, session orchestration, stale-result suppression, and protocol events. |
-| `backend/app/worker_protocol.py` | Versioned, bounded four-byte length-prefixed JSON framing and command validation. |
+| `backend/app/worker_protocol.py` | Versioned, bounded four-byte length-prefixed JSON framing, strict known-field validation, and safe protocol errors. |
 | `backend/app/session.py` | VAD, rolling buffers, partial/final inference triggers, and overlap cleanup. |
 
 ## Worker protocol and lifecycle
@@ -47,16 +51,18 @@ session: idle -> recording -> stopping -> idle
                          -> canceling -> idle
 ```
 
-`stop` drains accepted audio and finalizes the utterance. `cancel` discards the session; Electron main ignores events for canceled or superseded generations. Cancellation cannot interrupt native inference already executing in a worker thread, so stale transcript suppression is authoritative.
+`stop` drains accepted audio and finalizes the utterance. `cancel` discards the session; Electron main ignores events for canceled or superseded generations. Cancellation cannot interrupt native inference already executing in a worker thread, so stale transcript suppression is authoritative. Electron main accepts a final result only for the active session while it is finalizing; completed, cancelled, and failed states are terminal.
 
 ## Limits and trust boundaries
 
 * Worker records and PCM frames are size-bounded before decoding or processing.
 * Electron main maintains bounded write queues and honors child-stdin backpressure.
 * The renderer limits unresolved audio submissions and drops newest audio under pressure rather than growing memory without bound.
-* Only the hidden recorder window may invoke dictation IPC handlers; Electron main validates the sender, payload, and lifecycle state.
-* The worker is launched with `shell: false`, piped stdio, a small environment, and no local listening port.
-* The Python sidecar is not an OS sandbox. Packaging, code signing, model verification, and stronger Windows containment remain production work.
+* Each window receives only its role-specific preload API. Electron main validates sender, exact payload shape, size, and lifecycle state before allocation or forwarding.
+* The worker is launched with `shell: false`, piped stdio, a fixed packaged-sidecar path, a small environment, and no local listening port.
+* Official models are activated only after `backend/app/model_manifest.py` verification. Custom models require a disabled-by-default configuration-file opt-in (`CUSTOM_MODEL_CONFIG_PATH`) and a canonical path beneath `CUSTOM_MODELS_DIR`; they remain user-managed and untrusted relative to official artifacts.
+* Clipboard copy is the default. Opt-in paste checks the captured foreground target again immediately before injection and falls back to copy-only behavior when verification is unavailable or changed.
+* The Python sidecar is not an OS sandbox. Durianflow does not protect against malware, an administrator, or an unlocked Windows session.
 
 ## Durable state
 

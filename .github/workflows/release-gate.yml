@@ -1,0 +1,37 @@
+name: Release prerequisite gate
+
+on:
+  # Run before a release is created from a version tag. Branch protection or a
+  # protected release environment should require this check before publication.
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  require-reproducible-python-inputs:
+    name: Require hash-locked Python dependencies
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify CPU and GPU lockfiles
+        shell: pwsh
+        run: |
+          $locks = @(
+            'backend/requirements/cpu.lock',
+            'backend/requirements/gpu-windows.lock'
+          )
+          foreach ($lock in $locks) {
+            if (-not (Test-Path -LiteralPath $lock)) {
+              throw "Release blocked: missing $lock. Generate and review it as documented in backend/requirements/README.md."
+            }
+            if (-not (Select-String -LiteralPath $lock -Pattern '--hash=sha256:' -Quiet)) {
+              throw "Release blocked: $lock does not contain pip hashes."
+            }
+          }
+      - name: Record manual release requirements
+        shell: pwsh
+        run: |
+          Write-Host 'Signing, packaged-artifact inspection, and offline Windows smoke testing are required by docs/release-checklist.md before publication.'

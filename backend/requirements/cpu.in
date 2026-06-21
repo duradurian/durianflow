@@ -1,0 +1,11 @@
+# Direct runtime dependencies for the CPU distribution.
+#
+# This is an input file, not a lockfile. Do not ship from it directly. The
+# release process compiles it into requirements/cpu.lock with hashes.
+pydantic
+pydantic-settings
+numpy
+scipy
+soundfile
+faster-whisper
+python-dotenv

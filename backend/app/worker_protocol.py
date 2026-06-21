@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import struct
+from uuid import UUID
 from collections.abc import Mapping
 from typing import Any, BinaryIO
 
@@ -23,6 +24,16 @@ PROTOCOL_VERSION = 1
 MAX_CONTROL_BYTES = 64 * 1024
 MAX_AUDIO_BYTES = 64 * 1024
 MAX_FRAME_BYTES = MAX_CONTROL_BYTES + (MAX_AUDIO_BYTES * 4 // 3) + 1024
+MAX_COUNTER = 2**31 - 1
+
+_COMMAND_FIELDS = {
+    "hello": frozenset({"protocolVersion", "type", "sequence"}),
+    "shutdown": frozenset({"protocolVersion", "type", "sequence"}),
+    "start": frozenset({"protocolVersion", "type", "sequence", "sessionId", "generation", "sampleRate", "channels", "format", "language", "mode"}),
+    "audio": frozenset({"protocolVersion", "type", "sequence", "sessionId", "generation", "audioBase64"}),
+    "stop": frozenset({"protocolVersion", "type", "sequence", "sessionId", "generation"}),
+    "cancel": frozenset({"protocolVersion", "type", "sequence", "sessionId", "generation"}),
+}
 
 
 class ProtocolError(ValueError):
@@ -36,7 +47,7 @@ def validate_start_message(raw: Any, settings: Settings) -> StartMessage:
         or message.channels != settings.CHANNELS
         or message.format != "pcm_s16le"
     ):
-        raise ValueError("Expected pcm_s16le, mono, 16000 Hz audio.")
+        raise ProtocolError("INVALID_AUDIO_FORMAT")
     return message
 
 
@@ -73,44 +84,52 @@ def write_record(stream: BinaryIO, record: Mapping[str, Any]) -> None:
 def validate_command(record: Mapping[str, Any], settings: Settings) -> dict[str, Any]:
     """Validate common envelope fields and normalize an inbound command."""
     if record.get("protocolVersion") != PROTOCOL_VERSION:
-        raise ProtocolError("unsupported protocolVersion")
+        raise ProtocolError("UNSUPPORTED_PROTOCOL")
     command_type = record.get("type")
-    if command_type not in {"hello", "start", "audio", "stop", "cancel", "shutdown"}:
-        raise ProtocolError("unsupported command type")
+    if command_type not in _COMMAND_FIELDS:
+        raise ProtocolError("UNSUPPORTED_COMMAND")
+    if set(record) != _COMMAND_FIELDS[command_type]:
+        raise ProtocolError("INVALID_COMMAND_SHAPE")
     sequence = record.get("sequence")
-    if not isinstance(sequence, int) or sequence < 0:
-        raise ProtocolError("sequence must be a non-negative integer")
+    if type(sequence) is not int or not 0 <= sequence <= MAX_COUNTER:
+        raise ProtocolError("INVALID_SEQUENCE")
     if command_type in {"start", "audio", "stop", "cancel"}:
-        if not isinstance(record.get("sessionId"), str) or not record["sessionId"]:
-            raise ProtocolError("sessionId is required")
-        if not isinstance(record.get("generation"), int) or record["generation"] < 0:
-            raise ProtocolError("generation must be a non-negative integer")
+        session_id = record.get("sessionId")
+        if not isinstance(session_id, str) or len(session_id) != 36:
+            raise ProtocolError("INVALID_SESSION_ID")
+        try:
+            if str(UUID(session_id)) != session_id:
+                raise ValueError
+        except ValueError as exc:
+            raise ProtocolError("INVALID_SESSION_ID") from exc
+        generation = record.get("generation")
+        if type(generation) is not int or not 0 <= generation <= MAX_COUNTER:
+            raise ProtocolError("INVALID_GENERATION")
     command = dict(record)
     if command_type == "start":
-        start = dict(record)
-        start["session_id"] = start.pop("sessionId")
-        start.pop("protocolVersion", None)
-        start.pop("generation", None)
-        start.pop("sequence", None)
+        start = {key: value for key, value in record.items() if key not in {"protocolVersion", "generation", "sequence"}}
         try:
             command["start"] = validate_start_message(start, settings)
         except (ValidationError, ValueError) as exc:
-            raise ProtocolError(str(exc)) from exc
+            # Pydantic diagnostics can echo hostile values.  The desktop only
+            # needs a stable public error code; detailed validation belongs in
+            # the local security log.
+            raise ProtocolError("INVALID_START_MESSAGE") from exc
     elif command_type == "audio":
         encoded = record.get("audioBase64")
         if not isinstance(encoded, str):
-            raise ProtocolError("audioBase64 is required")
+            raise ProtocolError("INVALID_AUDIO_FRAME")
         # Reject oversized encoded data before base64 allocates a decoded payload.
         if len(encoded) > ((MAX_AUDIO_BYTES + 2) // 3) * 4:
-            raise ProtocolError("audio frame exceeds size limit")
+            raise ProtocolError("INVALID_AUDIO_FRAME")
         try:
             audio = base64.b64decode(encoded, validate=True)
         except (ValueError, TypeError) as exc:
-            raise ProtocolError("audioBase64 is invalid") from exc
+            raise ProtocolError("INVALID_AUDIO_FRAME") from exc
         if len(audio) > MAX_AUDIO_BYTES:
-            raise ProtocolError("audio frame exceeds size limit")
+            raise ProtocolError("INVALID_AUDIO_FRAME")
         if not audio or len(audio) % 2:
-            raise ProtocolError("audio frame must be non-empty PCM16")
+            raise ProtocolError("INVALID_AUDIO_FRAME")
         command["audio"] = audio
     return command
 

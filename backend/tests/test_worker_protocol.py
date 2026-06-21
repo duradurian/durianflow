@@ -28,19 +28,48 @@ def test_framing_rejects_truncated_and_oversized_records() -> None:
 
 
 def test_audio_validation_rejects_oversized_or_odd_pcm() -> None:
-    common = {"sessionId": "s", "generation": 1}
+    common = {"sessionId": "11111111-1111-4111-8111-111111111111", "generation": 1}
     oversized = base64.b64encode(b"x" * (MAX_AUDIO_BYTES + 1)).decode()
-    with pytest.raises(ProtocolError, match="exceeds"):
+    with pytest.raises(ProtocolError, match="INVALID_AUDIO_FRAME"):
         validate_command(envelope("audio", audioBase64=oversized, **common), Settings())
     odd = base64.b64encode(b"x").decode()
-    with pytest.raises(ProtocolError, match="PCM16"):
+    with pytest.raises(ProtocolError, match="INVALID_AUDIO_FRAME"):
         validate_command(envelope("audio", audioBase64=odd, **common), Settings())
 
 
 def test_start_validation_normalizes_session_id() -> None:
     command = validate_command(
-        envelope("start", sessionId="session", generation=2, sample_rate=16000, channels=1,
+        envelope("start", sessionId="11111111-1111-4111-8111-111111111111", generation=2, sampleRate=16000, channels=1,
                  format="pcm_s16le", language="en", mode="fast"),
         Settings(),
     )
-    assert command["start"].session_id == "session"
+    assert str(command["start"].session_id) == "11111111-1111-4111-8111-111111111111"
+
+
+def test_rejects_extra_start_fields_and_non_uuid_session() -> None:
+    with pytest.raises(ProtocolError, match="INVALID_COMMAND_SHAPE"):
+        validate_command(envelope("start", sessionId="not-a-uuid", generation=2, sampleRate=16000,
+                         channels=1, format="pcm_s16le", language="en", mode="fast", unexpected=True), Settings())
+    with pytest.raises(ProtocolError, match="INVALID_SESSION_ID"):
+        validate_command(envelope("start", sessionId="not-a-uuid", generation=2, sampleRate=16000,
+                         channels=1, format="pcm_s16le", language="en", mode="fast"), Settings())
+
+
+@pytest.mark.parametrize("message_type,fields", [
+    ("hello", {}),
+    ("shutdown", {}),
+    ("stop", {"sessionId": "11111111-1111-4111-8111-111111111111", "generation": 1}),
+    ("cancel", {"sessionId": "11111111-1111-4111-8111-111111111111", "generation": 1}),
+])
+def test_rejects_unknown_envelope_fields(message_type: str, fields: dict) -> None:
+    with pytest.raises(ProtocolError, match="INVALID_COMMAND_SHAPE"):
+        validate_command(envelope(message_type, unexpected=True, **fields), Settings())
+
+
+def test_session_commands_require_canonical_uuid_and_bounded_counters() -> None:
+    with pytest.raises(ProtocolError, match="INVALID_SESSION_ID"):
+        validate_command(envelope("stop", sessionId="not-a-uuid", generation=1), Settings())
+    with pytest.raises(ProtocolError, match="INVALID_GENERATION"):
+        validate_command(envelope("stop", sessionId="11111111-1111-4111-8111-111111111111", generation=True), Settings())
+    with pytest.raises(ProtocolError, match="INVALID_SEQUENCE"):
+        validate_command({"protocolVersion": 1, "type": "hello", "sequence": 2**31}, Settings())

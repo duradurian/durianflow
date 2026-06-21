@@ -24,7 +24,18 @@ Press `Ctrl+Alt+Space` to start dictation, then press it again to stop, finalize
 
 ## Model and device configuration
 
-With `ALLOW_MODEL_DOWNLOAD=true`, worker startup can download/cache the selected model. For offline startup, install a model explicitly with `scripts/install_model.py`, or set `MODEL_PATH` and set `ALLOW_MODEL_DOWNLOAD=false`.
+Worker startup never downloads a model. `MODEL_PATH` overrides are rejected so
+the worker cannot be redirected to an arbitrary local directory. Install the
+release-approved model explicitly before starting the worker:
+
+```powershell
+python scripts/install_model.py large-v3-turbo
+```
+
+The installer stages the declared immutable revision under `MODELS_DIR` and
+verifies its repository-controlled hashes before activation. See
+[model-security.md](model-security.md) for the separate, disabled-by-default
+custom-model configuration-file policy.
 
 CPU configuration in `backend/.env`:
 

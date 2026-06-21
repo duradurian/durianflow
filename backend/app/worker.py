@@ -6,9 +6,12 @@ import asyncio
 import logging
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, BinaryIO, Callable
+from uuid import UUID
 
 from app.config import Settings, get_settings
+from app.logging_config import configure_logging
 from app.session import TranscriptionSession, TranscriberProtocol
 from app.transcriber import WhisperTranscriber
 from app.worker_protocol import ProtocolError, event, read_record, validate_command, write_record
@@ -49,8 +52,8 @@ class TranscriptionWorker:
             await asyncio.to_thread(self.transcriber.load)  # type: ignore[attr-defined]
         except Exception as exc:
             self.model_state = "unavailable"
-            logger.exception("Worker model load failed")
-            await self.emit(event("model_state", state="unavailable", message=str(exc)))
+            logger.error("Worker model load failed (%s)", type(exc).__name__)
+            await self.emit(event("model_state", state="unavailable", message="Model initialization failed."))
         else:
             self.model_state = "ready"
             await self.emit(event("model_state", state="ready"))
@@ -59,7 +62,8 @@ class TranscriptionWorker:
         try:
             command = validate_command(raw, self.settings)
         except ProtocolError as exc:
-            await self.emit(event("error", code="INVALID_MESSAGE", message=str(exc)))
+            logger.warning("Rejected worker command (%s)", exc)
+            await self.emit(event("error", code=str(exc), message="Worker command rejected."))
             return
         command_type = command["type"]
         if command_type == "hello":
@@ -113,17 +117,17 @@ class TranscriptionWorker:
         start = command["start"]
         self.active = ActiveSession(
             session=TranscriptionSession(
-                session_id=start.session_id, sample_rate=start.sample_rate, channels=start.channels,
+            session_id=str(start.session_id), sample_rate=start.sample_rate, channels=start.channels,
                 language=start.language, mode=start.mode, settings=self.settings,
                 transcriber=self.transcriber, semaphore=self.semaphore,
             ),
             generation=command["generation"], last_sequence=command["sequence"],
         )
-        await self.emit(event("accepted", sessionId=start.session_id, generation=command["generation"],
+        await self.emit(event("accepted", sessionId=str(start.session_id), generation=command["generation"],
                               sequence=command["sequence"], acceptedBytes=0,
                               creditBytes=MAX_QUEUED_AUDIO_BYTES))
         await self._emit_session_events([
-            {"type": "ready", "session_id": start.session_id, "model": self.settings.MODEL_NAME,
+            {"type": "ready", "session_id": str(start.session_id), "model": self.settings.MODEL_NAME,
              "sample_rate": self.settings.SAMPLE_RATE}, {"type": "status", "status": "listening"}
         ])
 
@@ -147,17 +151,19 @@ class TranscriptionWorker:
             async with self._audio_processing_lock:
                 events = await active.session.accept_pcm16(audio)
         except ValueError as exc:
-            await self._error(command, "INVALID_AUDIO_FRAME", str(exc))
+            logger.warning("Rejected invalid audio frame: %s", exc)
+            await self._error(command, "INVALID_AUDIO_FRAME", "Audio frame is invalid.")
             return
         except Exception as exc:
-            logger.exception("Worker session failed")
-            await self._error(command, "INFERENCE_FAILURE", str(exc))
+            logger.error("Worker session failed (%s)", type(exc).__name__)
+            await self._error(command, "INFERENCE_FAILURE", "Transcription failed.")
             return
-        if not active.canceled:
+        if self.active is active and not active.canceled:
             await self._emit_session_events(events)
-            await self.emit(event("accepted", sessionId=active.session.session_id, generation=active.generation,
-                                  sequence=command["sequence"], acceptedBytes=len(audio),
-                                  creditBytes=MAX_QUEUED_AUDIO_BYTES))
+            if self.active is active and not active.canceled:
+                await self.emit(event("accepted", sessionId=active.session.session_id, generation=active.generation,
+                                      sequence=command["sequence"], acceptedBytes=len(audio),
+                                      creditBytes=MAX_QUEUED_AUDIO_BYTES))
 
     async def _stop(self, command: dict[str, Any]) -> None:
         active = self._matching_active(command)
@@ -167,10 +173,11 @@ class TranscriptionWorker:
         try:
             await self.drain_audio()
             events = await active.session.stop()
-            if not active.canceled:
+            if self.active is active and not active.canceled:
                 await self._emit_session_events(events)
-                await self.emit(event("stopped", sessionId=active.session.session_id,
-                                      generation=active.generation, sequence=command["sequence"]))
+                if self.active is active and not active.canceled:
+                    await self.emit(event("stopped", sessionId=active.session.session_id,
+                                          generation=active.generation, sequence=command["sequence"]))
         finally:
             self.active = None
 
@@ -190,23 +197,48 @@ class TranscriptionWorker:
         return self.active
 
     async def _emit_session_events(self, events: list[dict[str, Any]]) -> None:
-        if not self.active or self.active.canceled:
+        active = self.active
+        if not active or active.canceled:
             return
         for item in events:
+            if self.active is not active or active.canceled:
+                return
             payload = dict(item)
             if "session_id" in payload:
                 payload["sessionId"] = payload.pop("session_id")
             else:
-                payload["sessionId"] = self.active.session.session_id
-            payload["generation"] = self.active.generation
+                payload["sessionId"] = active.session.session_id
+            payload["generation"] = active.generation
             await self.emit(event(payload.pop("type"), **payload))
 
     async def _emit_stopped(self, command: dict[str, Any]) -> None:
         await self.emit(event("status", sessionId=command["sessionId"], generation=command["generation"], status="stopped"))
 
     async def _error(self, command: dict[str, Any], code: str, message: str) -> None:
-        fields = {key: command[key] for key in ("sessionId", "generation", "sequence") if key in command}
+        fields = _safe_command_identity(command)
         await self.emit(event("error", code=code, message=message, **fields))
+
+
+def _safe_command_identity(command: dict[str, Any]) -> dict[str, Any]:
+    """Never reflect unvalidated command fields into worker output."""
+    session_id = command.get("sessionId")
+    generation = command.get("generation")
+    sequence = command.get("sequence")
+    if not isinstance(session_id, str) or len(session_id) != 36:
+        return {}
+    try:
+        if str(UUID(session_id)) != session_id:
+            return {}
+    except ValueError:
+        return {}
+    if (
+        type(generation) is not int
+        or type(sequence) is not int
+        or not 0 <= generation <= 2**31 - 1
+        or not 0 <= sequence <= 2**31 - 1
+    ):
+        return {}
+    return {"sessionId": session_id, "generation": generation, "sequence": sequence}
 
 
 async def run_worker(stdin: BinaryIO = sys.stdin.buffer, stdout: BinaryIO = sys.stdout.buffer) -> None:
@@ -244,7 +276,8 @@ async def run_worker(stdin: BinaryIO = sys.stdin.buffer, stdout: BinaryIO = sys.
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(levelname)s %(message)s")
+    settings = get_settings()
+    configure_logging(Path(settings.LOG_DIR) if settings.LOG_DIR else None)
     asyncio.run(run_worker())
 
 

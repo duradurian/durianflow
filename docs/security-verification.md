@@ -175,3 +175,18 @@ Each row supplies the required Status, Reviewer, Date (inherited: 2026-06-20), C
 2. Lock down model installation: allowlist model IDs, constrain canonical paths to a controlled model root, reject symlink/UNC/traversal inputs, and use a pinned integrity manifest.
 3. Add strict IPC/config schemas, receiver-side size limits before allocation, security-event logging with redaction/rotation, and desktop negative/integration tests.
 4. Establish the release baseline: pinned Python dependencies and scan, signed/provenanced package build, artifact inspection, `SECURITY.md`, and user-facing threat/clipboard limitations.
+
+## Remediation tracking (2026-06-21)
+
+This section records implementation work after the review above. It is not a
+new ASVS verification: the original status rows remain the evidence snapshot
+for commit `3d97c27018856abeedc2321ed12e6ef313da1fd1` and must be re-tested on
+the release candidate.
+
+| Work item | Implemented control | Verification still required |
+|---|---|---|
+| Vulnerability reporting | Root `SECURITY.md` defines private GitHub reporting, scope, and response targets. | Enable GitHub private vulnerability reporting for the repository and test its routing. |
+| Dependency baseline | `backend/requirements/*.in` defines CPU/GPU/dev sources; the release gate rejects a release without committed hash-bearing CPU and Windows GPU locks. | Generate, review, commit, and install from the actual lockfiles; remediate any audit findings. |
+| Continuous checks | `.github/workflows/security.yml` runs Windows desktop syntax, npm audit, backend tests, pip check, and pip-audit. | Confirm workflow execution on the repository and tune any justified audit exceptions. |
+| Release provenance | `docs/release-checklist.md` requires signing, checksums, SBOM, provenance, artifact inspection, and clean offline Windows smoke evidence. | Add protected signing secrets/build infrastructure and attach the evidence to an actual release. |
+| User-facing threats | README and desktop documentation describe clipboard, auto-paste, malware/unlocked-session, and custom-model limitations. | Recheck UI copy against the final settings implementation. |

@@ -1,0 +1,5 @@
+# Windows GPU release input. Compile this together with cpu.in into the
+# platform-specific requirements/gpu-windows.lock file.
+-r cpu.in
+nvidia-cublas-cu12; sys_platform == "win32"
+nvidia-cudnn-cu12; sys_platform == "win32"

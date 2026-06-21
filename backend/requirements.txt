@@ -1,8 +1,4 @@
-pydantic
-pydantic-settings
-numpy
-scipy
-soundfile
-faster-whisper
+# Development convenience manifest. Release artifacts must use the hash-locked
+# requirements/cpu.lock generated from requirements/cpu.in.
+-r requirements/cpu.in
 pytest
-python-dotenv

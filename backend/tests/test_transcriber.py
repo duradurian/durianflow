@@ -19,6 +19,7 @@ def test_cuda_load_can_fallback_to_cpu(monkeypatch, tmp_path) -> None:
     fake_module = types.SimpleNamespace(WhisperModel=FakeWhisperModel)
     monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
     monkeypatch.setattr("app.transcriber.configure_cuda_dll_paths", lambda: [])
+    monkeypatch.setattr("app.transcriber.resolve_model_source", lambda _settings: ("verified-local-model", True))
 
     transcriber = WhisperTranscriber(
         Settings(
@@ -47,6 +48,7 @@ def test_model_source_errors_populate_load_error(monkeypatch, tmp_path) -> None:
     fake_module = types.SimpleNamespace(WhisperModel=object)
     monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
 
+    monkeypatch.setattr("app.transcriber.resolve_model_source", lambda _settings: (_ for _ in ()).throw(RuntimeError("Model unavailable")))
     transcriber = WhisperTranscriber(
         Settings(
             _env_file=None,
@@ -58,8 +60,8 @@ def test_model_source_errors_populate_load_error(monkeypatch, tmp_path) -> None:
         )
     )
 
-    with pytest.raises(RuntimeError, match="Local Whisper model was not found"):
+    with pytest.raises(RuntimeError, match="Model unavailable"):
         transcriber.load()
 
     assert transcriber.load_error is not None
-    assert "Local Whisper model was not found" in transcriber.load_error
+    assert "Model unavailable" in transcriber.load_error

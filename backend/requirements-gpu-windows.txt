@@ -1,3 +1,4 @@
--r requirements.txt
-nvidia-cublas-cu12; sys_platform == "win32"
-nvidia-cudnn-cu12; sys_platform == "win32"
+# Development convenience manifest. Release artifacts must use the hash-locked
+# requirements/gpu-windows.lock generated from requirements/gpu-windows.in.
+-r requirements/gpu-windows.in
+pytest

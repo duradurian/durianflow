@@ -10,7 +10,8 @@ Durianflow does not use the hosted OpenAI API. Speech recognition runs on your o
 ## Features
 
 - Global hotkey dictation with toggle or hold-to-speak behavior.
-- Automatic paste into the focused Windows app.
+- Copy-to-clipboard completion by default, with opt-in automatic paste when
+  the original foreground target can be revalidated.
 - Local `faster-whisper` transcription through a supervised stdio worker.
 - Tray settings for hotkey, microphone, language, fast or accurate mode, paste behavior, and backend status.
 - Optional local writing assistance through `llama.cpp` or Ollama.
@@ -50,16 +51,22 @@ Then:
 2. Press `Ctrl+Alt+Space`.
 3. Speak.
 4. Press `Ctrl+Alt+Space` again, or release it if hold mode is enabled.
-5. Durianflow pastes the finalized transcript into the focused textbox.
+5. Durianflow copies the finalized transcript. If you explicitly enable
+   automatic paste, it pastes only when it can still verify the intended
+   foreground target; otherwise the text remains on the clipboard for you to
+   paste manually.
 
-Before the first transcription, Durianflow can download and cache the configured Whisper model automatically. To preinstall it explicitly:
+Packaged releases do not download models at runtime. Install approved models
+explicitly during setup or through the release-approved model installation
+flow:
 
 ```powershell
 cd backend
 python scripts/install_model.py large-v3-turbo
 ```
 
-If `ALLOW_MODEL_DOWNLOAD=false` is set and the model is missing, `/health` reports the setup error instead of downloading.
+If `ALLOW_MODEL_DOWNLOAD=false` is set and the model is missing, worker setup
+fails without downloading a model.
 
 If PowerShell blocks `npm.ps1`, use the command shim:
 
@@ -136,8 +143,10 @@ Backend settings are loaded from `backend/.env`. Important defaults:
 ```env
 MODEL_NAME=large-v3-turbo
 MODELS_DIR=./models
-MODEL_PATH=
-ALLOW_MODEL_DOWNLOAD=true
+# MODEL_PATH is intentionally unsupported; leave it unset.
+ALLOW_MODEL_DOWNLOAD=false
+CUSTOM_MODELS_DIR=
+CUSTOM_MODEL_CONFIG_PATH=
 DEVICE=cuda
 COMPUTE_TYPE=float16
 LANGUAGE=en
@@ -151,6 +160,32 @@ API_TOKEN=
 ```
 
 For fully offline startup, preinstall a model with `scripts/install_model.py` and set `ALLOW_MODEL_DOWNLOAD=false`.
+
+## Security and privacy
+
+Durianflow processes dictation locally, but that does not protect against
+malware, a compromised Windows account, an administrator, or an unlocked PC.
+Audio and transcript data are held in memory during an active dictation, and
+the final text is placed on the clipboard. Treat the clipboard as sensitive:
+other applications running under your account may be able to access it.
+
+Automatic paste is opt-in. Durianflow captures the intended target before
+recording and falls back to clipboard-only completion if it cannot revalidate
+that target. Review text manually before pasting it into privileged terminals,
+password fields, chat applications, or remote sessions.
+
+Official models are release-controlled and integrity-checked. Custom models,
+when enabled through the local configuration file, are user-managed and do not
+have the same provenance guarantees. Anyone able to edit that file can change
+the custom-model policy.
+
+The backend custom-model contract is documented in
+[docs/model-security.md](docs/model-security.md). It is disabled by default and
+is not a renderer setting.
+
+See [SECURITY.md](SECURITY.md) for vulnerability reporting and
+[docs/release-checklist.md](docs/release-checklist.md) for the Windows release
+requirements.
 
 ## Local LLM Refinement
 
@@ -186,6 +221,8 @@ npm run check
 - [docs/architecture.md](docs/architecture.md): backend and desktop flow diagrams.
 - [docs/nvidia-gpu.md](docs/nvidia-gpu.md): NVIDIA GPU setup and CUDA troubleshooting.
 - [docs/troubleshooting.md](docs/troubleshooting.md): common startup, model, latency, and transcription issues.
+- [docs/release-checklist.md](docs/release-checklist.md): signed Windows-release and offline-smoke requirements.
+- [docs/model-security.md](docs/model-security.md): official-model provenance and custom-model configuration policy.
 
 ## Known Limitations
 

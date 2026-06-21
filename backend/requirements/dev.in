@@ -1,0 +1,4 @@
+# Development/test input. This never substitutes for a release lockfile.
+-r cpu.in
+pytest
+pip-audit

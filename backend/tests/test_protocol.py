@@ -9,7 +9,7 @@ def test_valid_start_message() -> None:
     msg = validate_start_message(
         {
             "type": "start",
-            "session_id": "abc",
+            "session_id": "11111111-1111-4111-8111-111111111111",
             "sample_rate": 16000,
             "channels": 1,
             "format": "pcm_s16le",
@@ -18,7 +18,7 @@ def test_valid_start_message() -> None:
         },
         settings,
     )
-    assert msg.session_id == "abc"
+    assert str(msg.session_id) == "11111111-1111-4111-8111-111111111111"
 
 
 def test_invalid_audio_format() -> None:
@@ -27,7 +27,7 @@ def test_invalid_audio_format() -> None:
         validate_start_message(
             {
                 "type": "start",
-                "session_id": "abc",
+                "session_id": "11111111-1111-4111-8111-111111111111",
                 "sample_rate": 48000,
                 "channels": 2,
                 "format": "pcm_s16le",

@@ -32,7 +32,10 @@ const DEFAULT_CONFIG = {
   mode: "fast",
   inputBehavior: "toggle",
   selectedInputDeviceId: "",
-  autoPaste: true,
+  // Pasting into the foreground application is an explicit opt-in.  A
+  // transcript is always copied first, which is safe when foreground-window
+  // verification is unavailable.
+  autoPaste: false,
   appendSpace: true,
   llmEnabled: false,
   llmProvider: "llamacpp",
@@ -62,6 +65,30 @@ let isQuitting = false;
 let isCapturingHotkey = false;
 let llmLoadState = { key: "", state: "off", provider: "", baseUrl: "", model: "" };
 let llmLoadRequestId = 0;
+let dictationSession = null;
+
+const MAX_AUDIO_FRAME_BYTES = 64 * 1024;
+const MAX_IPC_STRING_LENGTH = 5_000;
+const FINALIZATION_TIMEOUT_MS = 30_000;
+const CONFIG_KEYS = Object.freeze([
+  "hotkey",
+  "language",
+  "mode",
+  "inputBehavior",
+  "selectedInputDeviceId",
+  "autoPaste",
+  "appendSpace",
+  "llmEnabled",
+  "llmProvider",
+  "llmServerUrl",
+  "llmModel",
+  "ollamaServerUrl",
+  "ollamaModel",
+  "allowRemoteLlm",
+  "llmMode",
+  "llmLatencyBudgetMs",
+  "llmMaxBlockingChars",
+]);
 
 const rootDir = path.resolve(__dirname, "..", "..");
 const backendDir = path.join(rootDir, "backend");
@@ -89,6 +116,23 @@ function loadConfig() {
   }
 }
 
+function isPlainObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function securityLog(code, details = {}) {
+  // Keep security telemetry structural: never log transcripts, audio, IPC
+  // payloads, credentials, or untrusted exception text.
+  const safe = {};
+  for (const [key, value] of Object.entries(details)) {
+    if (typeof value === "string") safe[key] = value.slice(0, 80);
+    else if (typeof value === "number" || typeof value === "boolean") safe[key] = value;
+  }
+  console.warn(`[security] ${code}`, safe);
+}
+
 function acceleratorParts(accelerator) {
   return String(accelerator || "")
     .split("+")
@@ -113,10 +157,9 @@ function isSafeAccelerator(accelerator) {
 }
 
 function sanitizeConfig(nextConfig) {
-  const source = { ...(nextConfig || {}) };
-  for (const key of ["backendUrl", "healthUrl", "backendApiToken", "allowRemoteBackend", "autoStartBackend", "dictationTransport"]) {
-    delete source[key];
-  }
+  // Never spread a renderer- or file-controlled object into configuration.
+  // Unknown keys are deliberately ignored on load and rejected for IPC saves.
+  const source = isPlainObject(nextConfig) ? nextConfig : {};
   const booleanSetting = (value, defaultValue) => (typeof value === "boolean" ? value : defaultValue);
   const numericSetting = (value, defaultValue, min, max) => {
     const number = Number(value);
@@ -135,8 +178,6 @@ function sanitizeConfig(nextConfig) {
   const allowRemoteLlm = booleanSetting(source.allowRemoteLlm, DEFAULT_CONFIG.allowRemoteLlm);
 
   return {
-    ...DEFAULT_CONFIG,
-    ...source,
     hotkey: isSafeAccelerator(hotkey) ? hotkey : DEFAULT_CONFIG.hotkey,
     language: source.language ? String(source.language).trim() : null,
     mode: source.mode === "accurate" ? "accurate" : "fast",
@@ -171,9 +212,49 @@ function sanitizeConfig(nextConfig) {
   };
 }
 
+function validateConfigPatch(nextConfig) {
+  if (!isPlainObject(nextConfig)) {
+    throw new TypeError("Configuration update must be an object");
+  }
+  const patch = Object.create(null);
+  for (const key of Object.keys(nextConfig)) {
+    if (!CONFIG_KEYS.includes(key)) {
+      securityLog("config_rejected_unknown_key", { key });
+      throw new TypeError("Configuration update contains an unsupported field");
+    }
+    patch[key] = nextConfig[key];
+  }
+  return patch;
+}
+
+function mergeConfigPatch(baseConfig, patch) {
+  const merged = Object.create(null);
+  for (const key of CONFIG_KEYS) {
+    merged[key] = Object.hasOwn(patch, key) ? patch[key] : baseConfig[key];
+  }
+  return merged;
+}
+
+function publicConfig() {
+  const visible = Object.create(null);
+  for (const key of CONFIG_KEYS) visible[key] = config[key];
+  return visible;
+}
+
 function saveConfig() {
   fs.mkdirSync(app.getPath("userData"), { recursive: true });
-  fs.writeFileSync(configPath(), JSON.stringify(config, null, 2));
+  const target = configPath();
+  const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(publicConfig(), null, 2), { encoding: "utf8", mode: 0o600 });
+    try { fs.chmodSync(temporary, 0o600); } catch {}
+    fs.renameSync(temporary, target);
+    try { fs.chmodSync(target, 0o600); } catch {}
+  } finally {
+    try {
+      if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+    } catch {}
+  }
 }
 
 function llmDescriptor(sourceConfig = config) {
@@ -352,11 +433,18 @@ function createRecorderWindow() {
     webPreferences: secureWebPreferences({
       preload: path.join(__dirname, "preload.js"),
       backgroundThrottling: false,
+      devTools: !app.isPackaged,
     }),
   });
 
   recorderWindow.loadFile(path.join(__dirname, "recorder.html"));
   registerTrustedWindow(recorderWindow);
+  recorderWindow.on("closed", () => {
+    if (!dictationSession) return;
+    const session = dictationSession;
+    endDictationSession(session, "cancelled");
+    try { localWorkerTransport?.cancel(); } catch {}
+  });
 }
 
 function createStatusWindow() {
@@ -374,6 +462,7 @@ function createStatusWindow() {
     title: `${PRODUCT_NAME} Status`,
     webPreferences: secureWebPreferences({
       preload: path.join(__dirname, "preload.js"),
+      devTools: !app.isPackaged,
     }),
   });
 
@@ -453,6 +542,7 @@ function createSettingsWindow() {
     title: SETTINGS_TITLE,
     webPreferences: secureWebPreferences({
       preload: path.join(__dirname, "preload.js"),
+      devTools: !app.isPackaged,
     }),
   });
 
@@ -501,6 +591,7 @@ function createAdvancedSettingsWindow() {
     parent: settingsWindow && !settingsWindow.isDestroyed() ? settingsWindow : undefined,
     webPreferences: secureWebPreferences({
       preload: path.join(__dirname, "preload.js"),
+      devTools: !app.isPackaged,
     }),
   });
 
@@ -534,7 +625,7 @@ function openAdvancedSettingsWindow() {
 function notifyConfigUpdated() {
   for (const window of [settingsWindow, advancedSettingsWindow]) {
     if (window && !window.isDestroyed()) {
-      window.webContents.send("config:updated", config);
+      window.webContents.send("config:updated", publicConfig());
     }
   }
 }
@@ -833,8 +924,51 @@ function isRecorderSender(event) {
 function assertRecorderSender(event) {
   assertTrustedFileSender(event);
   if (!isRecorderSender(event)) {
+    securityLog("ipc_rejected_wrong_window", { channel: "dictation" });
     throw new Error("Dictation IPC is only available to the recorder window");
   }
+}
+
+function isSettingsSender(event) {
+  return Boolean(
+    [settingsWindow, advancedSettingsWindow].some((window) => (
+      window && !window.isDestroyed() && event?.sender?.id === window.webContents.id
+    )),
+  );
+}
+
+function assertSettingsSender(event) {
+  assertTrustedFileSender(event);
+  if (!isSettingsSender(event)) {
+    securityLog("ipc_rejected_wrong_window", { channel: "settings" });
+    throw new Error("Settings IPC is only available to settings windows");
+  }
+}
+
+function assertPrimarySettingsSender(event) {
+  assertTrustedFileSender(event);
+  if (!settingsWindow || settingsWindow.isDestroyed() || event?.sender?.id !== settingsWindow.webContents.id) {
+    securityLog("ipc_rejected_wrong_window", { channel: "primary-settings" });
+    throw new Error("This action is only available to the settings window");
+  }
+}
+
+async function captureForegroundTarget() {
+  if (process.platform !== "win32") return null;
+  const script = [
+    "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class DurianflowForeground { [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow(); [DllImport(\"user32.dll\")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId); }'",
+    "$window = [DurianflowForeground]::GetForegroundWindow()",
+    "$processId = 0",
+    "[void][DurianflowForeground]::GetWindowThreadProcessId($window, [ref]$processId)",
+    "if ($window -ne [IntPtr]::Zero -and $processId -gt 0) { Write-Output ($window.ToInt64().ToString() + '|' + $processId.ToString()) }",
+  ].join("\n");
+  const output = await execFileText("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], 750);
+  const match = output.trim().match(/^(-?\d+)\|(\d+)$/);
+  return match ? { window: match[1], processId: match[2] } : null;
+}
+
+function sameForegroundTarget(left, right) {
+  return Boolean(left && right && left.window === right.window && left.processId === right.processId);
 }
 
 function recorderStartConfig() {
@@ -846,9 +980,32 @@ function recorderStartConfig() {
 }
 
 function workerLaunchOptions() {
-  const configuredPython = String(process.env.DURIANFLOW_PYTHON || "").trim();
+  if (app.isPackaged) {
+    // Production uses only the sidecar installed alongside the signed app.
+    // Do not fall back to PATH or a user-controlled environment override.
+    const runtimeDir = path.join(process.resourcesPath, "durianflow-runtime");
+    const command = path.join(runtimeDir, "python", "python.exe");
+    const worker = path.join(runtimeDir, "backend", "scripts", "run_worker.py");
+    if (!fs.existsSync(command) || !fs.existsSync(worker)) {
+      throw new Error("The packaged speech runtime is unavailable");
+    }
+    return {
+      kind: "worker",
+      command,
+      args: [worker],
+      cwd: path.join(runtimeDir, "backend"),
+      env: {
+        PATH: path.dirname(command),
+        PYTHONUNBUFFERED: "1",
+        PYTHONUTF8: "1",
+      },
+    };
+  }
+
+  // Source checkouts remain convenient for development, but this branch is
+  // never reachable from a packaged release.
   const venvPython = path.join(backendDir, ".venv", "Scripts", "python.exe");
-  const command = configuredPython || (fs.existsSync(venvPython) ? venvPython : "python");
+  const command = fs.existsSync(venvPython) ? venvPython : "python";
   return {
     kind: "worker",
     command,
@@ -864,10 +1021,73 @@ function workerLaunchOptions() {
   };
 }
 
-function forwardWorkerEvent(event) {
-  if (!recorderWindow || recorderWindow.isDestroyed()) {
-    return;
+function isCurrentWorkerEvent(event, session = dictationSession) {
+  return Boolean(
+    session
+    && session.generation !== null
+    && event?.sessionId === session.id
+    && event?.generation === session.generation,
+  );
+}
+
+function clearFinalizationTimer(session) {
+  if (session?.finalizationTimer) {
+    clearTimeout(session.finalizationTimer);
+    session.finalizationTimer = null;
   }
+}
+
+function endDictationSession(session, state) {
+  if (!session || dictationSession !== session) return false;
+  clearFinalizationTimer(session);
+  session.state = state;
+  dictationSession = null;
+  isRecording = false;
+  setTrayMenu();
+  return true;
+}
+
+function failDictationSession(session, code = "TRANSCRIPTION_FAILED") {
+  if (!endDictationSession(session, "failed")) return;
+  securityLog("dictation_session_failed", { code });
+  showStatus("error", "Transcription failed", true);
+  if (recorderWindow && !recorderWindow.isDestroyed()) {
+    recorderWindow.webContents.send("dictation:error", { code, message: "Transcription failed" });
+  }
+}
+
+function armFinalizationTimeout(session) {
+  clearFinalizationTimer(session);
+  session.finalizationTimer = setTimeout(() => {
+    if (dictationSession !== session || session.state !== "finalizing") return;
+    failDictationSession(session, "TRANSCRIPTION_TIMEOUT");
+    // A worker that cannot finish a session is no longer trustworthy for the
+    // next one.  The supervisor kills the complete process tree on force.
+    localWorkerTransport?.shutdown({ force: true }).catch(() => {});
+  }, FINALIZATION_TIMEOUT_MS);
+}
+
+function forwardWorkerEvent(event) {
+  const session = dictationSession;
+  if (isCurrentWorkerEvent(event, session)) {
+    if (event.type === "final" && ["recording", "stopping", "finalizing"].includes(session.state)) {
+      const text = typeof event.text === "string" ? event.text.slice(0, MAX_IPC_STRING_LENGTH) : "";
+      if (text) session.finalSegments.push(text);
+    } else if (event.type === "error") {
+      failDictationSession(session, typeof event.code === "string" ? event.code : "WORKER_FAILURE");
+    } else if (event.type === "canceled") {
+      endDictationSession(session, "cancelled");
+    } else if (
+      (event.type === "stopped" || (event.type === "status" && event.status === "stopped"))
+      && session.state === "finalizing"
+    ) {
+      completeDictation(session, session.finalSegments.join(" ")).catch(() => {
+        failDictationSession(session, "TRANSCRIPTION_FINALIZATION_FAILED");
+      });
+    }
+  }
+
+  if (!recorderWindow || recorderWindow.isDestroyed()) return;
   if (event.type === "partial" || event.type === "final") {
     recorderWindow.webContents.send("dictation:transcript", event);
   } else if (event.type === "status" || event.type === "ready" || event.type === "stopped" || event.type === "canceled") {
@@ -903,10 +1123,12 @@ function createLocalWorkerTransport() {
     }
   });
   localWorkerTransport.on("error", (error) => {
-    const message = error?.message || "Transcription worker failed";
-    showStatus("error", message, true);
+    const code = error?.code || "WORKER_FAILURE";
+    securityLog("worker_failure", { code });
+    if (dictationSession) failDictationSession(dictationSession, code);
+    showStatus("error", "Transcription worker failed", true);
     if (recorderWindow && !recorderWindow.isDestroyed()) {
-      recorderWindow.webContents.send("dictation:error", { code: error?.code || "WORKER_FAILURE", message });
+      recorderWindow.webContents.send("dictation:error", { code, message: "Transcription worker failed" });
     }
   });
   return localWorkerTransport;
@@ -925,7 +1147,10 @@ async function ensureLocalWorkerReady(signal) {
     throw new Error("Speech model is unavailable");
   }
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => cleanup(new Error("Speech model readiness timed out")), 10 * 60 * 1000);
+    const timeout = setTimeout(() => {
+      transport.shutdown({ force: true }).catch(() => {});
+      cleanup(new Error("Speech model readiness timed out"));
+    }, 2 * 60 * 1000);
     const abort = () => cleanup(new Error("Speech model startup canceled"));
     const model = (event) => {
       if (event.state === "ready") cleanup(null, transport.getState());
@@ -953,7 +1178,7 @@ async function startDictation() {
   if (!recorderWindow || recorderWindow.isDestroyed()) {
     return;
   }
-  if (isRecording || isStartingDictation || isCapturingHotkey) {
+  if (isRecording || isStartingDictation || isCapturingHotkey || dictationSession) {
     return;
   }
 
@@ -969,6 +1194,18 @@ async function startDictation() {
     if (cancelStartingDictation) {
       return;
     }
+    // Capture before microphone recording starts.  Auto-paste is disabled if
+    // this cannot be established or changes before completion.
+    const foregroundTarget = await captureForegroundTarget();
+    if (cancelStartingDictation) return;
+    dictationSession = {
+      id: randomUUID(),
+      generation: null,
+      state: "recording",
+      foregroundTarget,
+      finalSegments: [],
+      finalizationTimer: null,
+    };
     isRecording = true;
     setTrayMenu();
     showStatus("recording", "Listening...", true);
@@ -997,6 +1234,9 @@ function stopDictation() {
     return;
   }
   isRecording = false;
+  if (dictationSession?.state === "recording") {
+    dictationSession.state = "stopping";
+  }
   setTrayMenu();
   showStatus("transcribing", "Transcribing...", true);
   recorderWindow.webContents.send("dictation:stop");
@@ -1026,7 +1266,7 @@ function normalizeTranscript(text) {
   return config.appendSpace ? `${clean} ` : clean;
 }
 
-function pasteText(text, insertedMessage = "Inserted dictation") {
+async function pasteText(text, insertedMessage = "Inserted dictation", expectedTarget = null) {
   const normalized = normalizeTranscript(text);
   if (!normalized) {
     showStatus("ready", "No speech detected");
@@ -1038,6 +1278,12 @@ function pasteText(text, insertedMessage = "Inserted dictation") {
 
   if (!config.autoPaste) {
     showStatus("ready", "Transcript copied to clipboard");
+    return;
+  }
+
+  const currentTarget = await captureForegroundTarget();
+  if (!sameForegroundTarget(expectedTarget, currentTarget)) {
+    showStatus("ready", "Transcript copied; focused app changed");
     return;
   }
 
@@ -1091,20 +1337,27 @@ function fallbackStatusMessage(result) {
     : "Inserted dictation";
 }
 
-async function completeDictation(text) {
-  isRecording = false;
-  setTrayMenu();
+async function completeDictation(session, text) {
+  if (dictationSession !== session || session.state !== "finalizing") return;
+  session.state = "completing";
+  clearFinalizationTimer(session);
   const transcript = text || "";
 
+  const pasteForSession = async (value, message) => {
+    if (dictationSession !== session || session.state !== "completing") return;
+    await pasteText(value, message, session.foregroundTarget);
+    endDictationSession(session, "completed");
+  };
+
   if (!shouldAttemptRefinement(transcript, config)) {
-    pasteText(transcript);
+    await pasteForSession(transcript);
     return;
   }
 
   if (shouldBlockForRefinement(transcript, config)) {
     showStatus("transcribing", "Refining text...", true);
     const result = await refineText(transcript, config);
-    pasteText(result.text, fallbackStatusMessage(result));
+    await pasteForSession(result.text, fallbackStatusMessage(result));
     return;
   }
 
@@ -1115,21 +1368,12 @@ async function completeDictation(text) {
   ]);
 
   if (immediate?.status === "refined") {
-    pasteText(immediate.text);
+    await pasteForSession(immediate.text);
   } else {
-    pasteText(transcript);
+    await pasteForSession(transcript);
   }
 
   refinement.catch(() => {});
-}
-
-function trustedOn(channel, handler) {
-  ipcMain.on(channel, (event, ...args) => {
-    if (!isTrustedFileSender(event)) {
-      return;
-    }
-    handler(event, ...args);
-  });
 }
 
 function trustedHandle(channel, handler) {
@@ -1139,27 +1383,9 @@ function trustedHandle(channel, handler) {
   });
 }
 
-trustedOn("dictation:complete", (_event, payload) => {
-  completeDictation(payload?.text || "").catch(() => {
-    pasteText(payload?.text || "", "LLM unavailable, inserted transcript");
-  });
-});
-
-trustedOn("dictation:error", (_event, payload) => {
-  isRecording = false;
-  setTrayMenu();
-  showStatus("error", payload?.message || "Dictation failed");
-});
-
-trustedOn("dictation:status", (_event, payload) => {
-  if (payload?.message) {
-    showStatus(payload.state || "ready", payload.message, payload.sticky);
-  }
-});
-
 trustedHandle("dictation:start/request", async (event, request) => {
   assertRecorderSender(event);
-  if (!isRecording) {
+  if (!isRecording || !dictationSession || dictationSession.state !== "recording" || dictationSession.generation !== null) {
     return { status: "rejected_no_session", message: "Dictation is not active" };
   }
   const transport = createLocalWorkerTransport();
@@ -1167,35 +1393,58 @@ trustedHandle("dictation:start/request", async (event, request) => {
   if (state.worker !== "ready" || state.model !== "ready") {
     return { status: "rejected_worker_not_ready", message: "Speech worker is not ready" };
   }
-  const payload = request && typeof request === "object" ? request : {};
+  if (!isPlainObject(request)) {
+    securityLog("dictation_start_rejected", { reason: "invalid_shape" });
+    return { status: "rejected_over_limit", message: "Invalid dictation request" };
+  }
+  const allowedStartKeys = new Set(["language", "mode", "sampleRate", "channels", "format"]);
+  if (Object.keys(request).some((key) => !allowedStartKeys.has(key))) {
+    securityLog("dictation_start_rejected", { reason: "unknown_field" });
+    return { status: "rejected_over_limit", message: "Invalid dictation request" };
+  }
+  const payload = request;
   const sampleRate = Number(payload.sampleRate);
   const channels = Number(payload.channels);
-  const mode = payload.mode === "accurate" ? "accurate" : "fast";
+  if (typeof payload.language !== "undefined" && (typeof payload.language !== "string" || payload.language.length > 32)) {
+    return { status: "rejected_over_limit", message: "Invalid dictation language" };
+  }
+  if (!["fast", "accurate"].includes(payload.mode)) {
+    return { status: "rejected_over_limit", message: "Invalid dictation mode" };
+  }
+  const mode = payload.mode;
   if (sampleRate !== 16000 || channels !== 1 || payload.format !== "pcm_s16le") {
     return { status: "rejected_over_limit", message: "Expected mono 16 kHz PCM16 audio" };
   }
   try {
     const session = transport.start({
-      sessionId: randomUUID(),
+      sessionId: dictationSession.id,
       sampleRate,
       channels,
       format: "pcm_s16le",
       language: payload.language ? String(payload.language).slice(0, 32) : null,
       mode,
     });
+    dictationSession.generation = session.generation;
     return { status: "accepted", ...session };
   } catch (error) {
-    return { status: "rejected_no_session", message: error?.message || "Could not start dictation" };
+    securityLog("dictation_start_failed", { code: error?.code || "UNKNOWN" });
+    return { status: "rejected_no_session", message: "Could not start dictation" };
   }
 });
 
 trustedHandle("dictation:audio", (event, audio) => {
   assertRecorderSender(event);
-  if (!localWorkerTransport) {
+  if (!localWorkerTransport || !dictationSession || dictationSession.state !== "recording") {
     return { status: "rejected_worker_not_ready" };
   }
   if (!(audio instanceof ArrayBuffer)) {
     return { status: "rejected_over_limit", message: "Audio must be an ArrayBuffer" };
+  }
+  // Check before Buffer.from so a compromised renderer cannot force a large
+  // allocation in the main process.
+  if (!audio.byteLength || audio.byteLength > MAX_AUDIO_FRAME_BYTES || audio.byteLength % 2 !== 0) {
+    securityLog("audio_rejected", { bytes: audio.byteLength || 0 });
+    return { status: "rejected_over_limit", message: "Invalid PCM audio frame" };
   }
   try {
     return localWorkerTransport.sendAudio(Buffer.from(audio))
@@ -1204,56 +1453,78 @@ trustedHandle("dictation:audio", (event, audio) => {
   } catch (error) {
     return {
       status: error?.code === "WORKER_BACKPRESSURE" ? "rejected_backpressure" : "rejected_no_session",
-      message: error?.message,
+      message: "Could not send audio",
     };
   }
 });
 
 trustedHandle("dictation:stop", (event) => {
   assertRecorderSender(event);
-  if (!localWorkerTransport) return { status: "rejected_no_session" };
+  if (!localWorkerTransport || !dictationSession || !["recording", "stopping"].includes(dictationSession.state)) {
+    return { status: "rejected_no_session" };
+  }
   try {
-    return localWorkerTransport.stop() ? { status: "accepted" } : { status: "rejected_no_session" };
+    const accepted = localWorkerTransport.stop();
+    if (!accepted) return { status: "rejected_no_session" };
+    dictationSession.state = "finalizing";
+    armFinalizationTimeout(dictationSession);
+    return { status: "accepted" };
   } catch (error) {
-    return { status: "rejected_stopping", message: error?.message };
+    securityLog("dictation_stop_failed", { code: error?.code || "UNKNOWN" });
+    return { status: "rejected_stopping", message: "Could not stop dictation" };
   }
 });
 
 trustedHandle("dictation:cancel", (event) => {
   assertRecorderSender(event);
-  if (!localWorkerTransport) return { status: "rejected_no_session" };
+  if (!localWorkerTransport || !dictationSession) return { status: "rejected_no_session" };
+  const session = dictationSession;
+  if (["cancelled", "completed", "failed"].includes(session.state)) return { status: "rejected_no_session" };
   try {
-    return localWorkerTransport.cancel() ? { status: "accepted" } : { status: "rejected_no_session" };
+    const accepted = localWorkerTransport.cancel();
+    if (!accepted) return { status: "rejected_no_session" };
+    endDictationSession(session, "cancelled");
+    showStatus("ready", `Ready: ${config.hotkey}`);
+    return { status: "accepted" };
   } catch (error) {
-    return { status: "rejected_canceling", message: error?.message };
+    securityLog("dictation_cancel_failed", { code: error?.code || "UNKNOWN" });
+    return { status: "rejected_canceling", message: "Could not cancel dictation" };
   }
 });
 
 trustedHandle("dictation:state:get", (event) => {
   assertRecorderSender(event);
-  return localWorkerTransport ? localWorkerTransport.getState() : { worker: "stopped", model: "unknown", session: null };
+  const state = localWorkerTransport ? localWorkerTransport.getState() : { worker: "stopped", model: "unknown", session: null };
+  return { worker: state.worker, model: state.model, session: dictationSession ? { state: dictationSession.state } : null };
 });
 
-trustedHandle("config:get", (event) => ({
-  config,
-  configPath: configPath(),
-  appVersion: app.getVersion(),
-}));
+trustedHandle("config:get", (event) => {
+  assertSettingsSender(event);
+  return { config: publicConfig(), appVersion: app.getVersion() };
+});
 
-trustedHandle("hotkey-capture:start", () => {
+trustedHandle("hotkey-capture:start", (event) => {
+  assertPrimarySettingsSender(event);
   isCapturingHotkey = true;
   stopShortcutRegistration();
   return { ok: true };
 });
 
-trustedHandle("hotkey-capture:end", () => {
+trustedHandle("hotkey-capture:end", (event) => {
+  assertPrimarySettingsSender(event);
   return endHotkeyCapture();
 });
 
-trustedHandle("config:save", async (_event, nextConfig) => {
+trustedHandle("config:save", async (event, nextConfig) => {
+  assertSettingsSender(event);
   const previousConfig = { ...config };
-  const patch = nextConfig && typeof nextConfig === "object" ? nextConfig : {};
-  const next = sanitizeConfig({ ...config, ...patch });
+  let patch;
+  try {
+    patch = validateConfigPatch(nextConfig);
+  } catch {
+    return { ok: false, error: "INVALID_CONFIG", config: publicConfig() };
+  }
+  const next = sanitizeConfig(mergeConfigPatch(config, patch));
   const shortcutChanged = next.hotkey !== config.hotkey || next.inputBehavior !== config.inputBehavior;
   const hotkeySafe = isSafeAccelerator(next.hotkey);
 
@@ -1283,33 +1554,44 @@ trustedHandle("config:save", async (_event, nextConfig) => {
   );
 
   return {
-    config,
-    configPath: configPath(),
+    ok: true,
+    config: publicConfig(),
     hotkeyRegistered,
     restoredHotkeyRegistered,
   };
 });
 
-trustedHandle("ollama:models", async (_event, baseUrl) => {
+trustedHandle("ollama:models", async (event, baseUrl) => {
+  assertSettingsSender(event);
+  if (typeof baseUrl !== "string" || baseUrl.length > 2_048) {
+    return [];
+  }
   const url = sanitizeHttpServiceUrl(baseUrl, config.ollamaServerUrl, config.allowRemoteLlm);
   return listOllamaModels(url);
 });
 
-trustedHandle("llm:preload", async (_event, nextConfig) => {
-  const preloadConfig = sanitizeConfig({
-    ...config,
-    ...nextConfig,
-    llmEnabled: Boolean(nextConfig?.llmEnabled),
-  });
+trustedHandle("llm:preload", async (event, nextConfig) => {
+  assertSettingsSender(event);
+  let patch;
+  try {
+    patch = validateConfigPatch(nextConfig);
+  } catch {
+    return { ok: false, status: "invalid_config" };
+  }
+  const merged = mergeConfigPatch(config, patch);
+  merged.llmEnabled = Boolean(patch.llmEnabled);
+  const preloadConfig = sanitizeConfig(merged);
   return preloadConfiguredLlm(preloadConfig, { force: true });
 });
 
-trustedHandle("advanced-settings:open", () => {
+trustedHandle("advanced-settings:open", (event) => {
+  assertPrimarySettingsSender(event);
   openAdvancedSettingsWindow();
   return { ok: true };
 });
 
-trustedHandle("app-status:get", async () => {
+trustedHandle("app-status:get", async (event) => {
+  assertSettingsSender(event);
   const worker = localWorkerTransport?.getState();
   const status = { ok: worker?.worker === "ready" && worker?.model === "ready", state: worker?.model || "stopped", message: "Local worker" };
   return {
@@ -1324,7 +1606,14 @@ trustedHandle("app-status:get", async () => {
   };
 });
 
-trustedHandle("settings-window:fit", (_event, size) => fitSettingsWindowToContent(size));
+trustedHandle("settings-window:fit", (event, size) => {
+  assertPrimarySettingsSender(event);
+  if (!isPlainObject(size)) return null;
+  return fitSettingsWindowToContent({
+    width: Number(size.width),
+    height: Number(size.height),
+  });
+});
 
 app.whenReady().then(async () => {
   loadConfig();

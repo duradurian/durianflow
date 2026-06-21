@@ -12,8 +12,24 @@ class Settings(BaseSettings):
     APP_NAME: str = "durianflow-backend"
     MODEL_NAME: str = "large-v3-turbo"
     MODELS_DIR: str = "./models"
+    # Models are installed deliberately into MODELS_DIR.  Arbitrary model paths
+    # and implicit network downloads turn a local transcription process into an
+    # uncontrolled code/data loading boundary, so both are disabled by default.
     MODEL_PATH: str | None = None
-    ALLOW_MODEL_DOWNLOAD: bool = True
+    ALLOW_MODEL_DOWNLOAD: bool = False
+    # Custom models are an explicit user-managed exception to official model
+    # provenance.  The JSON file only selects an ID below CUSTOM_MODELS_DIR;
+    # it never accepts an arbitrary model path or repository identifier.
+    CUSTOM_MODEL_CONFIG_PATH: str | None = None
+    CUSTOM_MODELS_DIR: str = "./custom-models"
+    LOG_DIR: str | None = None
+    # Recognize, but never use, retired server settings so an upgrade fails
+    # neither open nor silently.  They are retained only for configuration-file
+    # compatibility and must not create a network listener.
+    HOST: str | None = None
+    PORT: int | None = None
+    DURIANFLOW_SERVER_MODE: bool | None = None
+    REQUIRE_API_TOKEN: bool | None = None
     FALLBACK_TO_CPU_ON_CUDA_ERROR: bool = True
     DEVICE: str = "cuda"
     COMPUTE_TYPE: str = "float16"
@@ -35,7 +51,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(BACKEND_ROOT / ".env"),
         env_file_encoding="utf-8",
-        extra="ignore",
+        extra="forbid",
     )
 
 

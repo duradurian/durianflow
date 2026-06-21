@@ -194,7 +194,9 @@ class WorkerSupervisor extends EventEmitter {
     this.queuedBytes = 0;
     const previous = this.state;
     this.state = "stopped";
-    const detail = { error, ...exit, intentional: this.intentionalExit, stderr: this.stderr.toString("utf8") };
+    // stderr can contain model paths or exception data.  Keep only structural
+    // diagnostics on the public supervisor event.
+    const detail = { error: error ? new ProtocolError("Worker process error", "WORKER_PROCESS_ERROR") : null, ...exit, intentional: this.intentionalExit, stderrBytes: this.stderr.length };
     this.emit("exit", detail);
     if (!this.intentionalExit && previous !== "stopped") this.emit("fatal", new ProtocolError("Worker exited unexpectedly", "WORKER_EXITED"));
   }
@@ -202,17 +204,36 @@ class WorkerSupervisor extends EventEmitter {
   stop({ force = false } = {}) {
     if (!this.child) return Promise.resolve();
     this.intentionalExit = true;
-    if (force) { this.child.kill(); return Promise.resolve(); }
+    if (force) {
+      this._killProcessTree();
+      return Promise.resolve();
+    }
     this.state = "stopping";
-    try { this.send({ type: "shutdown", sequence: ++this.controlSequence }); } catch { this.child.kill(); return Promise.resolve(); }
+    try { this.send({ type: "shutdown", sequence: ++this.controlSequence }); } catch { this._killProcessTree(); return Promise.resolve(); }
     return new Promise((resolve) => {
       const done = () => { clearTimeout(this.shutdownTimer); resolve(); };
       this.once("exit", done);
       this.once("shutdown_ack", () => {
-        if (this.child) this.child.kill();
+        if (this.child) this._killProcessTree();
       });
-      this.shutdownTimer = setTimeout(() => { if (this.child) this.child.kill(); }, this.options.shutdownTimeoutMs);
+      this.shutdownTimer = setTimeout(() => { if (this.child) this._killProcessTree(); }, this.options.shutdownTimeoutMs);
     });
+  }
+
+  _killProcessTree() {
+    const child = this.child;
+    if (!child) return;
+    if (process.platform === "win32" && Number.isInteger(child.pid)) {
+      try {
+        const killer = spawn("taskkill.exe", ["/pid", String(child.pid), "/T", "/F"], {
+          windowsHide: true,
+          stdio: "ignore",
+        });
+        killer.on("error", () => { try { child.kill(); } catch {} });
+        return;
+      } catch {}
+    }
+    try { child.kill(); } catch {}
   }
 }
 
