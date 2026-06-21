@@ -10,9 +10,6 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 class Settings(BaseSettings):
     APP_NAME: str = "openflow-backend"
-    HOST: str = "127.0.0.1"
-    PORT: int = 8000
-    OPENFLOW_SERVER_MODE: bool = False
     MODEL_NAME: str = "large-v3-turbo"
     MODELS_DIR: str = "./models"
     MODEL_PATH: str | None = None
@@ -29,9 +26,6 @@ class Settings(BaseSettings):
     ROLLING_WINDOW_SECONDS: int = 6
     MAX_SESSION_SECONDS: int = 7200
     MAX_BUFFER_SECONDS: int = 60
-    REQUIRE_API_TOKEN: bool = False
-    API_TOKEN: str | None = None
-    ALLOWED_ORIGINS: str = ""
     MAX_CONCURRENT_TRANSCRIPTIONS: int = 1
     MODEL_LOAD_RETRY_SECONDS: int = 30
     VAD_ENERGY_THRESHOLD: float = Field(default=0.01, gt=0)

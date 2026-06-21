@@ -47,7 +47,6 @@ contextBridge.exposeInMainWorld("openflow", {
   onConfigUpdated: (callback) => subscribe("config:updated", callback),
   getConfig: () => ipcRenderer.invoke("config:get"),
   saveConfig: (config) => ipcRenderer.invoke("config:save", config),
-  testBackend: (healthUrl) => ipcRenderer.invoke("backend:test", healthUrl),
   listOllamaModels: (baseUrl) => ipcRenderer.invoke("ollama:models", baseUrl),
   preloadLlm: (config) => ipcRenderer.invoke("llm:preload", config),
   openAdvancedSettings: () => ipcRenderer.invoke("advanced-settings:open"),

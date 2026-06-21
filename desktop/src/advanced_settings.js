@@ -1,9 +1,4 @@
 const DEFAULT_ADVANCED = {
-  backendUrl: "ws://127.0.0.1:8000/v1/transcribe",
-  healthUrl: "http://127.0.0.1:8000/health",
-  backendApiToken: "",
-  allowRemoteBackend: false,
-  autoStartBackend: true,
   llmEnabled: false,
   llmProvider: "llamacpp",
   llmServerUrl: "http://localhost:8080/v1/chat/completions",
@@ -20,15 +15,9 @@ const form = document.getElementById("advanced-form");
 const formMessage = document.getElementById("form-message");
 const versionMessage = document.getElementById("version-message");
 const resetAdvancedButton = document.getElementById("reset-advanced");
-const testBackendButton = document.getElementById("test-backend");
 const refreshOllamaModelsButton = document.getElementById("refresh-ollama-models");
 
 const fields = {
-  backendUrl: document.getElementById("backendUrl"),
-  healthUrl: document.getElementById("healthUrl"),
-  backendApiToken: document.getElementById("backendApiToken"),
-  allowRemoteBackend: document.getElementById("allowRemoteBackend"),
-  autoStartBackend: document.getElementById("autoStartBackend"),
   llmEnabled: document.getElementById("llmEnabled"),
   llmProvider: document.getElementById("llmProvider"),
   llmServerUrl: document.getElementById("llmServerUrl"),
@@ -61,7 +50,6 @@ function setFormDisabled(disabled) {
     element.disabled = disabled;
   }
   resetAdvancedButton.disabled = disabled;
-  testBackendButton.disabled = disabled;
   refreshOllamaModelsButton.disabled = disabled;
 }
 
@@ -75,11 +63,6 @@ function readAdvancedConfig() {
 
   return {
     ...currentConfig,
-    backendUrl: fields.backendUrl.value.trim(),
-    healthUrl: fields.healthUrl.value.trim(),
-    backendApiToken: fields.backendApiToken.value.trim(),
-    allowRemoteBackend: fields.allowRemoteBackend.checked,
-    autoStartBackend: fields.autoStartBackend.checked,
     llmEnabled: fields.llmEnabled.checked,
     llmProvider: fields.llmProvider.value,
     llmServerUrl: fields.llmServerUrl.value.trim(),
@@ -103,11 +86,6 @@ function changedConfigPatch(nextConfig) {
 
 function snapshotConfig(config) {
   return JSON.stringify({
-    backendUrl: config.backendUrl,
-    healthUrl: config.healthUrl,
-    backendApiToken: config.backendApiToken,
-    allowRemoteBackend: Boolean(config.allowRemoteBackend),
-    autoStartBackend: Boolean(config.autoStartBackend),
     llmEnabled: Boolean(config.llmEnabled),
     llmProvider: config.llmProvider,
     llmServerUrl: config.llmServerUrl,
@@ -247,11 +225,6 @@ function setOllamaModelOptions(models, selectedModel = "") {
 
 function writeFormConfig(config, markSaved = false) {
   currentConfig = config;
-  fields.backendUrl.value = config.backendUrl || DEFAULT_ADVANCED.backendUrl;
-  fields.healthUrl.value = config.healthUrl || DEFAULT_ADVANCED.healthUrl;
-  fields.backendApiToken.value = config.backendApiToken || DEFAULT_ADVANCED.backendApiToken;
-  fields.allowRemoteBackend.checked = Boolean(config.allowRemoteBackend);
-  fields.autoStartBackend.checked = Boolean(config.autoStartBackend);
   fields.llmEnabled.checked = Boolean(config.llmEnabled);
   fields.llmProvider.value = config.llmProvider || DEFAULT_ADVANCED.llmProvider;
   fields.llmServerUrl.value = config.llmServerUrl || DEFAULT_ADVANCED.llmServerUrl;
@@ -359,20 +332,6 @@ fields.ollamaModel.addEventListener("change", () => {
 });
 
 refreshOllamaModelsButton.addEventListener("click", refreshOllamaModels);
-
-testBackendButton.addEventListener("click", async () => {
-  testBackendButton.disabled = true;
-  setMessage("Testing backend");
-
-  try {
-    const result = await window.openflow.testBackend(readAdvancedConfig());
-    setMessage(result.ok ? "Backend online" : result.message || "Backend offline", result.ok ? "ok" : "error");
-  } catch {
-    setMessage("Backend offline", "error");
-  } finally {
-    testBackendButton.disabled = false;
-  }
-});
 
 resetAdvancedButton.addEventListener("click", () => {
   writeFormConfig({ ...currentConfig, ...DEFAULT_ADVANCED });

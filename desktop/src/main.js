@@ -16,7 +16,7 @@ const {
   unloadOtherOllamaModels,
   unloadOllamaModel,
 } = require("./text_processor");
-const { isLocalHost, sanitizeBackendUrl, sanitizeHttpServiceUrl } = require("./url_policy");
+const { sanitizeHttpServiceUrl } = require("./url_policy");
 const { createDictationTransport } = require("./dictation_transport");
 const {
   assertTrustedFileSender,
@@ -27,10 +27,6 @@ const {
 } = require("./window_security");
 
 const DEFAULT_CONFIG = {
-  backendUrl: "ws://127.0.0.1:8000/v1/transcribe",
-  healthUrl: "http://127.0.0.1:8000/health",
-  backendApiToken: "",
-  allowRemoteBackend: false,
   hotkey: "CommandOrControl+Alt+Space",
   language: "en",
   mode: "fast",
@@ -38,8 +34,6 @@ const DEFAULT_CONFIG = {
   selectedInputDeviceId: "",
   autoPaste: true,
   appendSpace: true,
-  autoStartBackend: true,
-  dictationTransport: "worker",
   llmEnabled: false,
   llmProvider: "llamacpp",
   llmServerUrl: DEFAULT_LLAMACPP_URL,
@@ -58,8 +52,6 @@ let statusWindow;
 let settingsWindow;
 let advancedSettingsWindow;
 let tray;
-let backendProcess;
-let backendStartPromise;
 let localWorkerTransport;
 let hotkeyWatcherProcess;
 let isRecording = false;
@@ -121,6 +113,10 @@ function isSafeAccelerator(accelerator) {
 }
 
 function sanitizeConfig(nextConfig) {
+  const source = { ...(nextConfig || {}) };
+  for (const key of ["backendUrl", "healthUrl", "backendApiToken", "allowRemoteBackend", "autoStartBackend", "dictationTransport"]) {
+    delete source[key];
+  }
   const booleanSetting = (value, defaultValue) => (typeof value === "boolean" ? value : defaultValue);
   const numericSetting = (value, defaultValue, min, max) => {
     const number = Number(value);
@@ -129,56 +125,45 @@ function sanitizeConfig(nextConfig) {
     }
     return Math.min(max, Math.max(min, Math.round(number)));
   };
-  const hotkey = String(nextConfig?.hotkey || DEFAULT_CONFIG.hotkey).trim();
-  const llmMode = ["off", "grammar", "format", "enhance"].includes(nextConfig?.llmMode)
-    ? nextConfig.llmMode
+  const hotkey = String(source.hotkey || DEFAULT_CONFIG.hotkey).trim();
+  const llmMode = ["off", "grammar", "format", "enhance"].includes(source.llmMode)
+    ? source.llmMode
     : DEFAULT_CONFIG.llmMode;
-  const llmProvider = ["llamacpp", "ollama"].includes(nextConfig?.llmProvider)
-    ? nextConfig.llmProvider
+  const llmProvider = ["llamacpp", "ollama"].includes(source.llmProvider)
+    ? source.llmProvider
     : DEFAULT_CONFIG.llmProvider;
-  const allowRemoteBackend = booleanSetting(
-    nextConfig?.allowRemoteBackend,
-    DEFAULT_CONFIG.allowRemoteBackend,
-  );
   const allowRemoteLlm = booleanSetting(nextConfig?.allowRemoteLlm, DEFAULT_CONFIG.allowRemoteLlm);
-  const dictationTransport = nextConfig?.dictationTransport === "legacy" ? "legacy" : "worker";
 
   return {
     ...DEFAULT_CONFIG,
-    ...nextConfig,
-    backendUrl: sanitizeBackendUrl(nextConfig?.backendUrl, DEFAULT_CONFIG.backendUrl, allowRemoteBackend),
-    healthUrl: sanitizeHttpServiceUrl(nextConfig?.healthUrl, DEFAULT_CONFIG.healthUrl, allowRemoteBackend),
-    backendApiToken: String(nextConfig?.backendApiToken || "").trim(),
-    allowRemoteBackend,
+    ...source,
     hotkey: isSafeAccelerator(hotkey) ? hotkey : DEFAULT_CONFIG.hotkey,
-    language: nextConfig?.language ? String(nextConfig.language).trim() : null,
-    mode: nextConfig?.mode === "accurate" ? "accurate" : "fast",
-    inputBehavior: nextConfig?.inputBehavior === "hold" ? "hold" : "toggle",
-    selectedInputDeviceId: String(nextConfig?.selectedInputDeviceId || ""),
-    autoPaste: booleanSetting(nextConfig?.autoPaste, DEFAULT_CONFIG.autoPaste),
-    appendSpace: booleanSetting(nextConfig?.appendSpace, DEFAULT_CONFIG.appendSpace),
-    autoStartBackend: booleanSetting(nextConfig?.autoStartBackend, DEFAULT_CONFIG.autoStartBackend),
-    dictationTransport,
-    llmEnabled: booleanSetting(nextConfig?.llmEnabled, DEFAULT_CONFIG.llmEnabled),
+    language: source.language ? String(source.language).trim() : null,
+    mode: source.mode === "accurate" ? "accurate" : "fast",
+    inputBehavior: source.inputBehavior === "hold" ? "hold" : "toggle",
+    selectedInputDeviceId: String(source.selectedInputDeviceId || ""),
+    autoPaste: booleanSetting(source.autoPaste, DEFAULT_CONFIG.autoPaste),
+    appendSpace: booleanSetting(source.appendSpace, DEFAULT_CONFIG.appendSpace),
+    llmEnabled: booleanSetting(source.llmEnabled, DEFAULT_CONFIG.llmEnabled),
     llmProvider,
-    llmServerUrl: sanitizeHttpServiceUrl(nextConfig?.llmServerUrl, DEFAULT_LLM_URL, allowRemoteLlm),
-    llmModel: String(nextConfig?.llmModel || DEFAULT_CONFIG.llmModel).trim(),
+    llmServerUrl: sanitizeHttpServiceUrl(source.llmServerUrl, DEFAULT_LLM_URL, allowRemoteLlm),
+    llmModel: String(source.llmModel || DEFAULT_CONFIG.llmModel).trim(),
     ollamaServerUrl: sanitizeHttpServiceUrl(
-      nextConfig?.ollamaServerUrl,
+      source.ollamaServerUrl,
       DEFAULT_CONFIG.ollamaServerUrl,
       allowRemoteLlm,
     ),
-    ollamaModel: String(nextConfig?.ollamaModel || DEFAULT_CONFIG.ollamaModel).trim(),
+    ollamaModel: String(source.ollamaModel || DEFAULT_CONFIG.ollamaModel).trim(),
     allowRemoteLlm,
     llmMode,
     llmLatencyBudgetMs: numericSetting(
-      nextConfig?.llmLatencyBudgetMs,
+      source.llmLatencyBudgetMs,
       DEFAULT_CONFIG.llmLatencyBudgetMs,
       0,
       5000,
     ),
     llmMaxBlockingChars: numericSetting(
-      nextConfig?.llmMaxBlockingChars,
+      source.llmMaxBlockingChars,
       DEFAULT_CONFIG.llmMaxBlockingChars,
       1,
       5000,
@@ -793,126 +778,6 @@ async function endHotkeyCapture() {
   return { ok: await applyShortcutRegistration() };
 }
 
-function isLocalServiceUrl(value) {
-  try {
-    return isLocalHost(new URL(value).hostname);
-  } catch {
-    return false;
-  }
-}
-
-async function backendStatus(overrideConfig = config, signal) {
-  const requestController = new AbortController();
-  const requestTimeout = setTimeout(() => requestController.abort(), 5000);
-  const abortRequest = () => requestController.abort();
-  if (signal) {
-    if (signal.aborted) {
-      requestController.abort();
-    } else {
-      signal.addEventListener("abort", abortRequest, { once: true });
-    }
-  }
-
-  try {
-    const headers = {};
-    if (overrideConfig.backendApiToken) {
-      headers["x-api-token"] = overrideConfig.backendApiToken;
-    }
-    const response = await fetch(overrideConfig.healthUrl, {
-      headers,
-      signal: requestController.signal,
-    });
-    if (!response.ok) {
-      const authFailed = response.status === 401 || response.status === 403;
-      return {
-        ok: false,
-        reachable: true,
-        state: authFailed ? "error" : "offline",
-        message: authFailed ? "Backend authentication failed" : `HTTP ${response.status}`,
-        statusCode: response.status,
-        authFailed,
-      };
-    }
-    const body = await response.json();
-    const modelLoaded = Boolean(body.model_loaded);
-    const modelLoading = Boolean(body.model_loading);
-    const modelError = body.model_error ? String(body.model_error) : "";
-    return {
-      ok: true,
-      reachable: true,
-      state: modelLoaded ? "ready" : modelError ? "error" : "starting",
-      message: modelLoaded ? "Backend running" : modelError || "Backend starting",
-      modelLoaded,
-      modelLoading,
-      modelError,
-      modelName: body.model_name,
-      device: body.device,
-      computeType: body.compute_type,
-      activeDevice: body.active_device,
-      activeComputeType: body.active_compute_type,
-      expectedModelPath: body.expected_model_path,
-      modelRetryAfterSeconds: body.model_retry_after_seconds,
-    };
-  } catch {
-    return { ok: false, reachable: false, state: "offline", message: "Backend offline", authFailed: false };
-  } finally {
-    clearTimeout(requestTimeout);
-    if (signal) {
-      signal.removeEventListener("abort", abortRequest);
-    }
-  }
-}
-
-function waitForNextBackendCheck(signal) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(done, 500);
-    const abort = () => done();
-    function done() {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", abort);
-      resolve();
-    }
-    if (signal?.aborted) {
-      done();
-    } else {
-      signal?.addEventListener("abort", abort, { once: true });
-    }
-  });
-}
-
-async function waitForBackendReady(
-  timeoutMs = 10 * 60 * 1000,
-  shouldCancel = () => false,
-  onWaiting = () => {},
-  signal,
-) {
-  const started = Date.now();
-  let lastStatus = { ok: false, state: "offline", message: "Backend offline" };
-
-  while (Date.now() - started < timeoutMs) {
-    if (shouldCancel() || signal?.aborted) {
-      return { ...lastStatus, cancelled: true };
-    }
-    lastStatus = await backendStatus(config, signal);
-    if (shouldCancel() || signal?.aborted) {
-      return { ...lastStatus, cancelled: true };
-    }
-    if (lastStatus.ok && lastStatus.modelLoaded) {
-      return lastStatus;
-    }
-    if (lastStatus.ok && lastStatus.modelError) {
-      return lastStatus;
-    }
-    if (lastStatus.authFailed) {
-      return lastStatus;
-    }
-    onWaiting(lastStatus);
-    await waitForNextBackendCheck(signal);
-  }
-
-  return lastStatus;
-}
-
 function execFileText(command, args, timeoutMs = 1200) {
   return new Promise((resolve) => {
     execFile(command, args, { timeout: timeoutMs, windowsHide: true }, (error, stdout) => {
@@ -1080,67 +945,6 @@ async function ensureLocalWorkerReady(signal) {
   });
 }
 
-async function startBackendIfNeeded(signal) {
-  if (!config.autoStartBackend) {
-    return;
-  }
-  const status = await backendStatus(config, signal);
-  if (signal?.aborted) {
-    return;
-  }
-  if (status.reachable || status.authFailed || !isLocalServiceUrl(config.healthUrl)) {
-    return;
-  }
-  if (backendStartPromise) {
-    return backendStartPromise;
-  }
-  if (backendProcess) {
-    return;
-  }
-
-  backendStartPromise = new Promise((resolve) => {
-    const python = path.join(backendDir, ".venv", "Scripts", "python.exe");
-    const child = fs.existsSync(python)
-      ? spawn(python, ["scripts\\run_server.py"], {
-        cwd: backendDir,
-        windowsHide: true,
-        stdio: "ignore",
-      })
-      : spawn("powershell.exe", [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        path.join(backendDir, "run_backend.ps1"),
-      ], {
-        cwd: backendDir,
-        windowsHide: true,
-        stdio: "ignore",
-      });
-
-    backendProcess = child;
-    child.on("error", (error) => {
-      if (backendProcess === child) {
-        backendProcess = null;
-      }
-      showStatus("error", error.message || "Could not start backend");
-      resolve();
-    });
-    child.on("exit", () => {
-      if (backendProcess === child) {
-        backendProcess = null;
-      }
-    });
-    setTimeout(resolve, 1000);
-  });
-
-  try {
-    await backendStartPromise;
-  } finally {
-    backendStartPromise = null;
-  }
-}
-
 async function startDictation() {
   if (!recorderWindow || recorderWindow.isDestroyed()) {
     return;
@@ -1154,49 +958,17 @@ async function startDictation() {
   const startAbortController = new AbortController();
   dictationStartAbortController = startAbortController;
   setTrayMenu();
-  showStatus("transcribing", config.dictationTransport === "worker" ? "Starting speech worker..." : "Starting backend...", true);
+  showStatus("transcribing", "Starting speech worker...", true);
 
   try {
-    if (config.dictationTransport === "worker") {
-      await ensureLocalWorkerReady(startAbortController.signal);
-      if (cancelStartingDictation) {
-        return;
-      }
-      isRecording = true;
-      setTrayMenu();
-      showStatus("recording", "Listening...", true);
-      recorderWindow.webContents.send("dictation:start", recorderStartConfig());
-      return;
-    }
-    await startBackendIfNeeded(startAbortController.signal);
+    await ensureLocalWorkerReady(startAbortController.signal);
     if (cancelStartingDictation) {
       return;
     }
-
-    const status = await waitForBackendReady(
-      10 * 60 * 1000,
-      () => cancelStartingDictation,
-      (nextStatus) => {
-        if (nextStatus.modelLoading) {
-          showStatus("transcribing", `Preparing ${nextStatus.modelName || "speech model"}...`, true);
-        } else if (nextStatus.reachable) {
-          showStatus("transcribing", "Starting backend...", true);
-        }
-      },
-      startAbortController.signal,
-    );
-    if (status.cancelled || cancelStartingDictation) {
-      return;
-    }
-    if (!status.ok || !status.modelLoaded) {
-      showStatus("error", status.modelError || status.message || "Backend is not ready");
-      return;
-    }
-
     isRecording = true;
     setTrayMenu();
     showStatus("recording", "Listening...", true);
-    recorderWindow.webContents.send("dictation:start", config);
+    recorderWindow.webContents.send("dictation:start", recorderStartConfig());
   } finally {
     const wasCancelled = cancelStartingDictation;
     if (dictationStartAbortController === startAbortController) {
@@ -1383,9 +1155,6 @@ trustedOn("dictation:status", (_event, payload) => {
 
 trustedHandle("dictation:start/request", async (event, request) => {
   assertRecorderSender(event);
-  if (config.dictationTransport !== "worker") {
-    return { status: "rejected_legacy_transport", message: "Local worker transport is disabled" };
-  }
   if (!isRecording) {
     return { status: "rejected_no_session", message: "Dictation is not active" };
   }
@@ -1418,7 +1187,7 @@ trustedHandle("dictation:start/request", async (event, request) => {
 
 trustedHandle("dictation:audio", (event, audio) => {
   assertRecorderSender(event);
-  if (config.dictationTransport !== "worker" || !localWorkerTransport) {
+  if (!localWorkerTransport) {
     return { status: "rejected_worker_not_ready" };
   }
   if (!(audio instanceof ArrayBuffer)) {
@@ -1438,7 +1207,7 @@ trustedHandle("dictation:audio", (event, audio) => {
 
 trustedHandle("dictation:stop", (event) => {
   assertRecorderSender(event);
-  if (config.dictationTransport !== "worker" || !localWorkerTransport) return { status: "rejected_no_session" };
+  if (!localWorkerTransport) return { status: "rejected_no_session" };
   try {
     return localWorkerTransport.stop() ? { status: "accepted" } : { status: "rejected_no_session" };
   } catch (error) {
@@ -1448,7 +1217,7 @@ trustedHandle("dictation:stop", (event) => {
 
 trustedHandle("dictation:cancel", (event) => {
   assertRecorderSender(event);
-  if (config.dictationTransport !== "worker" || !localWorkerTransport) return { status: "rejected_no_session" };
+  if (!localWorkerTransport) return { status: "rejected_no_session" };
   try {
     return localWorkerTransport.cancel() ? { status: "accepted" } : { status: "rejected_no_session" };
   } catch (error) {
@@ -1462,7 +1231,7 @@ trustedHandle("dictation:state:get", (event) => {
 });
 
 trustedHandle("config:get", (event) => ({
-  config: isRecorderSender(event) ? { ...config, backendApiToken: "" } : config,
+  config,
   configPath: configPath(),
   appVersion: app.getVersion(),
 }));
@@ -1517,14 +1286,6 @@ trustedHandle("config:save", async (_event, nextConfig) => {
   };
 });
 
-trustedHandle("backend:test", async (_event, nextConfig) => {
-  const testConfig = sanitizeConfig({
-    ...config,
-    ...(typeof nextConfig === "object" ? nextConfig : { healthUrl: nextConfig }),
-  });
-  return backendStatus(testConfig);
-});
-
 trustedHandle("ollama:models", async (_event, baseUrl) => {
   const url = sanitizeHttpServiceUrl(baseUrl, config.ollamaServerUrl, config.allowRemoteLlm);
   return listOllamaModels(url);
@@ -1546,15 +1307,12 @@ trustedHandle("advanced-settings:open", () => {
 
 trustedHandle("app-status:get", async () => {
   const worker = localWorkerTransport?.getState();
-  const status = config.dictationTransport === "worker"
-    ? { ok: worker?.worker === "ready" && worker?.model === "ready", reachable: false, state: worker?.model || "stopped", message: "Local worker" }
-    : await backendStatus();
+  const status = { ok: worker?.worker === "ready" && worker?.model === "ready", state: worker?.model || "stopped", message: "Local worker" };
   return {
     isRecording,
     isStartingDictation,
-    isBackendProcessManaged: Boolean(backendProcess),
     worker,
-    backend: status,
+    workerStatus: status,
     llm: llmStatus(config),
     gpuMemory: await gpuMemoryStatus(),
     version: app.getVersion(),
@@ -1582,13 +1340,9 @@ app.whenReady().then(async () => {
   setTrayMenu();
 
   const hotkeyRegistered = await applyShortcutRegistration();
-  if (config.dictationTransport === "worker") {
-    ensureLocalWorkerReady().catch((error) => {
-      showStatus("error", error?.message || "Could not start speech worker", true);
-    });
-  } else {
-    await startBackendIfNeeded();
-  }
+  ensureLocalWorkerReady().catch((error) => {
+    showStatus("error", error?.message || "Could not start speech worker", true);
+  });
   preloadConfiguredLlmInBackground(config);
   if (hotkeyRegistered) {
     showStatus("ready", `Ready: ${config.hotkey}`);
@@ -1603,9 +1357,6 @@ app.on("will-quit", () => {
     // Electron cannot await will-quit handlers, but an orderly shutdown is
     // attempted first and the supervisor enforces its timeout.
     localWorkerTransport.shutdown().catch(() => {});
-  }
-  if (backendProcess) {
-    backendProcess.kill();
   }
 });
 

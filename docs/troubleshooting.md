@@ -1,52 +1,36 @@
 # Troubleshooting
 
-## Backend Unreachable
+## Speech worker does not start
 
-Confirm the backend is running and your client is connecting to `ws://127.0.0.1:8000/v1/transcribe`. Check `/health` with a browser or `curl`.
+The default desktop path needs a Python environment at `backend/.venv/Scripts/python.exe`. Recreate it from [local-setup.md](local-setup.md), or set `OPENFLOW_PYTHON` to a working Python interpreter. The desktop status window reports worker/model startup failures.
 
-## Desktop Hotkey Does Not Trigger
+## Model stays unavailable
 
-Another app may already own the accelerator. Open the Electron config file from the tray menu, change `hotkey`, and restart the desktop app.
+Check `backend/.env`, model location, and network access. With downloads disabled, run `python scripts/install_model.py large-v3-turbo` from `backend/` or provide `MODEL_PATH`. The worker reports model state separately from process readiness.
 
-## Transcript Does Not Paste
+## Desktop hotkey does not trigger
 
-The desktop client uses the clipboard plus a synthetic `Ctrl+V`. Make sure a normal editable textbox has focus when you stop dictation. If the target app blocks synthetic paste, set `autoPaste=false`; the transcript will remain on the clipboard.
+Another program may own the accelerator. Change `hotkey` in Settings and restart the desktop application.
 
-## Microphone Permission Denied
+## Transcript does not paste
 
-Windows may block microphone access for desktop apps. Enable microphone access in Windows Privacy & security settings, then restart the desktop client.
+Openflow writes the transcript to the clipboard then sends synthetic `Ctrl+V`. Focus a normal editable field before stopping. If the target blocks synthetic paste, disable `autoPaste`; the transcript remains on the clipboard.
 
-## CUDA Not Available
+## Microphone permission denied
 
-Set `DEVICE=cpu` and `COMPUTE_TYPE=int8` in `backend/.env`, then restart the backend. CUDA mode requires compatible NVIDIA drivers, CUDA libraries, and CTranslate2 GPU support.
+Enable microphone access for desktop apps in Windows Privacy & security settings, then restart Openflow.
 
-## `cublas64_12.dll` Not Found
+## CUDA is unavailable or a CUDA DLL is missing
 
-This means CTranslate2 is running in CUDA mode but Windows cannot find CUDA 12 cuBLAS. Install CUDA Toolkit 12.x and cuDNN for CUDA 12.x, add their `bin` directories to `PATH`, restart PowerShell, then verify:
+Temporarily use CPU mode:
 
-```powershell
-where cublas64_12.dll
-where cudnn64*.dll
+```env
+DEVICE=cpu
+COMPUTE_TYPE=int8
 ```
 
-The NVIDIA Docker setup avoids this host DLL problem by using a CUDA/cuDNN runtime image.
+For GPU mode, follow [nvidia-gpu.md](nvidia-gpu.md). `cublas64_12.dll` errors indicate that the CUDA 12 runtime is not available to the worker interpreter.
 
-## Model Missing
+## No transcript or duplicate text
 
-With `ALLOW_MODEL_DOWNLOAD=true`, startup can download and cache the configured Whisper model. If downloads are disabled or blocked, run `python scripts/install_model.py large-v3-turbo` from `backend/`, or set `MODEL_PATH` to an existing faster-whisper model directory.
-
-## Backend Rejects Remote URLs
-
-Openflow desktop mode allows only local backend and LLM URLs by default. Enable the matching Advanced setting only when you intentionally use a trusted remote server.
-
-## No Transcript During Silence
-
-The backend intentionally avoids transcribing silence. Speak above the VAD threshold or lower `VAD_ENERGY_THRESHOLD`.
-
-## Duplicate Text
-
-The MVP uses simple suffix/prefix overlap cleanup. Repeated phrases can still slip through when Whisper changes wording between windows.
-
-## High Latency
-
-Use `MODEL_NAME=small` or `distil-large-v3`, `DEVICE=cuda`, `COMPUTE_TYPE=float16`, and `mode=fast`. Reduce `ROLLING_WINDOW_SECONDS` only if your model remains accurate with less context.
+VAD intentionally ignores silence. Speak above `VAD_ENERGY_THRESHOLD` or lower it cautiously. Overlap cleanup reduces repeated phrases, but model rewording can still produce duplicates. For latency, choose a smaller model, `mode=fast`, and GPU inference where available.

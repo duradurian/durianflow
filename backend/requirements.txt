@@ -1,12 +1,8 @@
-fastapi
-uvicorn[standard]
 pydantic
 pydantic-settings
 numpy
 scipy
 soundfile
 faster-whisper
-websockets
 pytest
-httpx
 python-dotenv

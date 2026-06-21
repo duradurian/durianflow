@@ -2,7 +2,7 @@
 
 Note: App is in very early stages and has known issues. Treat it like a prototype.
 
-Openflow is a local Windows dictation app that turns speech into text in any focused textbox. It combines an Electron tray client with a FastAPI transcription backend powered by `faster-whisper` and CTranslate2.
+Openflow is a local Windows dictation app that turns speech into text in any focused textbox. It combines an Electron tray client with a supervised local Python transcription worker powered by `faster-whisper` and CTranslate2.
 
 Openflow does not use the hosted OpenAI API. Speech recognition runs on your own machine or server.
 
@@ -10,21 +10,19 @@ Openflow does not use the hosted OpenAI API. Speech recognition runs on your own
 
 - Global hotkey dictation with toggle or hold-to-speak behavior.
 - Automatic paste into the focused Windows app.
-- Local `faster-whisper` transcription over a FastAPI WebSocket backend.
+- Local `faster-whisper` transcription through a supervised stdio worker.
 - Tray settings for hotkey, microphone, language, fast or accurate mode, paste behavior, and backend status.
 - Optional local writing assistance through `llama.cpp` or Ollama.
 - CPU mode for broad compatibility and CUDA mode for NVIDIA GPU acceleration.
-- Backend HTTP/WebSocket API for custom clients.
 
 ## Repository Layout
 
 ```text
-backend/              FastAPI app, transcription sessions, VAD, model loading, and tests
-backend/scripts/      File transcription, WAV streaming, and benchmark utilities
+backend/              Worker, transcription sessions, VAD, model loading, and tests
+backend/scripts/      Worker, file transcription, model installation, and benchmark utilities
 desktop/              Electron tray app for Windows dictation and paste automation
-docs/                 Architecture, setup, backend API, GPU, and troubleshooting notes
-protocol.md           WebSocket message and PCM audio contract
-docker-compose.yml    NVIDIA GPU backend deployment helper
+docs/                 Architecture, setup, GPU, and troubleshooting notes
+protocol.md           Local worker framing and PCM audio contract
 ```
 
 ## Requirements
@@ -34,7 +32,6 @@ docker-compose.yml    NVIDIA GPU backend deployment helper
 - Node.js and npm for the Electron client.
 - A working microphone.
 - Optional: NVIDIA GPU with CUDA/cuDNN for GPU inference.
-- Optional: Docker with NVIDIA Container Toolkit for GPU container deployment.
 
 ## Quick Start
 
@@ -70,27 +67,7 @@ npm.cmd install
 npm.cmd start
 ```
 
-## Backend Setup
-
-The backend can be started manually from `backend/`.
-
-### Windows Launcher
-
-```powershell
-cd backend
-.\run_backend.ps1
-```
-
-The launcher creates `.venv` with Python 3.11 if needed, installs `requirements.txt` and `requirements-gpu-windows.txt` only during setup, then starts the backend on `127.0.0.1:8000`.
-
-If script execution is blocked:
-
-```powershell
-cd backend
-.\run_backend.bat
-```
-
-### Manual Setup
+## Worker Setup
 
 ```powershell
 cd backend
@@ -100,7 +77,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 python scripts/install_model.py large-v3-turbo
-python scripts/run_server.py
+python scripts/run_worker.py
 ```
 
 For CPU-only machines, edit `backend/.env`:
@@ -133,46 +110,7 @@ The app includes:
 - Main settings for hotkey, input behavior, microphone, language, transcription mode, and paste behavior.
 - Advanced settings for backend URLs, automatic backend startup, and optional local LLM refinement.
 
-Default desktop endpoints:
-
-```text
-Backend WebSocket: ws://127.0.0.1:8000/v1/transcribe
-Health check:      http://127.0.0.1:8000/health
-```
-
 See [desktop/README.md](desktop/README.md) for the full desktop configuration reference.
-
-## Backend API
-
-Openflow exposes:
-
-```text
-GET /health
-GET /v1/models
-WS  /v1/transcribe
-```
-
-Health check:
-
-```powershell
-curl http://127.0.0.1:8000/health
-```
-
-List known models:
-
-```powershell
-curl http://127.0.0.1:8000/v1/models
-```
-
-WebSocket clients connect to:
-
-```text
-ws://127.0.0.1:8000/v1/transcribe
-```
-
-The client sends a JSON `start` message, then binary little-endian signed 16-bit PCM audio: mono, 16 kHz. The backend emits `ready`, status, partial transcript, final transcript, and error events.
-
-See [protocol.md](protocol.md) and [docs/backend-api.md](docs/backend-api.md) for the full API contract.
 
 ## Backend Utilities
 
@@ -181,13 +119,6 @@ Transcribe an audio file:
 ```powershell
 cd backend
 python scripts/transcribe_file.py path\to\audio.wav
-```
-
-Stream a WAV file through the live WebSocket path:
-
-```powershell
-cd backend
-python scripts/stream_wav.py path\to\audio.wav --url ws://127.0.0.1:8000/v1/transcribe
 ```
 
 Benchmark models:
@@ -206,8 +137,6 @@ MODEL_NAME=large-v3-turbo
 MODELS_DIR=./models
 MODEL_PATH=
 ALLOW_MODEL_DOWNLOAD=true
-HOST=127.0.0.1
-OPENFLOW_SERVER_MODE=false
 DEVICE=cuda
 COMPUTE_TYPE=float16
 LANGUAGE=en
@@ -220,9 +149,7 @@ REQUIRE_API_TOKEN=false
 API_TOKEN=
 ```
 
-Set `OPENFLOW_SERVER_MODE=true`, `REQUIRE_API_TOKEN=true`, and `API_TOKEN=...` only when intentionally exposing the backend outside local desktop mode.
 For fully offline startup, preinstall a model with `scripts/install_model.py` and set `ALLOW_MODEL_DOWNLOAD=false`.
-For remote browser clients, also set `ALLOWED_ORIGINS` to the exact client origins that may open the WebSocket.
 
 ## Local LLM Refinement
 
@@ -235,21 +162,6 @@ Supported refinement modes are:
 - `enhance`: lightly improve phrasing.
 
 If the LLM server is unavailable or too slow, Openflow inserts the original transcript.
-
-## Docker
-
-The included Docker setup is NVIDIA-first and runs only the backend.
-
-```powershell
-Copy-Item backend\.env.example backend\.env
-cd backend
-python scripts\install_model.py --models-dir .\models
-cd ..
-$env:API_TOKEN="replace-with-a-long-random-token"
-docker compose up --build backend
-```
-
-Compose builds `backend/Dockerfile`, publishes port 8000 on `127.0.0.1` only, requires `API_TOKEN`, requests `gpus: all`, and mounts `backend/models` at `/app/models`. Install NVIDIA Container Toolkit before using this path.
 
 ## Development Checks
 
@@ -270,7 +182,6 @@ npm run check
 ## Documentation
 
 - [docs/local-setup.md](docs/local-setup.md): local backend and desktop setup.
-- [docs/backend-api.md](docs/backend-api.md): HTTP and WebSocket API details.
 - [docs/architecture.md](docs/architecture.md): backend and desktop flow diagrams.
 - [docs/nvidia-gpu.md](docs/nvidia-gpu.md): NVIDIA GPU setup and CUDA troubleshooting.
 - [docs/troubleshooting.md](docs/troubleshooting.md): common startup, model, latency, and transcription issues.

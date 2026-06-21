@@ -1,7 +1,6 @@
 const form = document.getElementById("settings-form");
 const formMessage = document.getElementById("form-message");
 const versionMessage = document.getElementById("version-message");
-const testBackendButton = document.getElementById("test-backend");
 const testMicButton = document.getElementById("test-mic");
 const advancedSettingsButton = document.getElementById("advanced-settings");
 const deviceSelect = document.getElementById("selectedInputDeviceId");
@@ -123,7 +122,6 @@ function setFormDisabled(disabled) {
   }
   hotkeyButton.disabled = disabled;
   recordHotkeyButton.disabled = disabled;
-  testBackendButton.disabled = disabled;
   testMicButton.disabled = disabled;
   advancedSettingsButton.disabled = disabled;
 }
@@ -454,17 +452,15 @@ async function refreshAppStatus() {
       status.isRecording ? "ok" : "",
     );
 
-    if (status.backend.ok) {
-      setState(backendState, status.backend.message || "Running", "ok");
+    if (status.workerStatus.ok) {
+      setState(backendState, status.workerStatus.message || "Running", "ok");
       setState(
         modelState,
-        status.backend.modelLoaded
-          ? `${status.backend.modelName} (${status.backend.device}/${status.backend.computeType})`
-          : "Loading",
-        status.backend.modelLoaded ? "ok" : "",
+        status.worker?.model === "ready" ? "Ready" : "Loading",
+        status.worker?.model === "ready" ? "ok" : "",
       );
     } else {
-      setState(backendState, status.backend.message || "Offline", "error");
+      setState(backendState, status.workerStatus.message || "Unavailable", "error");
       setState(modelState, "Unavailable", "error");
     }
 
@@ -501,7 +497,6 @@ function setHotkeyCaptureControlsDisabled(disabled) {
   for (const element of form.querySelectorAll("input[name='mode'], input[name='inputBehavior']")) {
     element.disabled = disabled;
   }
-  testBackendButton.disabled = disabled;
   testMicButton.disabled = disabled;
   advancedSettingsButton.disabled = disabled;
   recordHotkeyButton.classList.toggle("hidden", disabled);
@@ -649,22 +644,6 @@ form.addEventListener("change", () => noteFormChange());
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   queueAutoSave({ immediate: true });
-});
-
-testBackendButton.addEventListener("click", async () => {
-  testBackendButton.disabled = true;
-  setMessage("Testing backend");
-
-  try {
-    const result = await window.openflow.testBackend(currentConfig?.healthUrl);
-    setState(backendState, result.message || (result.ok ? "Backend running" : "Backend offline"), result.ok ? "ok" : "error");
-    setMessage(result.ok ? "Backend online" : "Backend offline", result.ok ? "ok" : "error");
-  } catch {
-    setState(backendState, "Backend offline", "error");
-    setMessage("Backend offline", "error");
-  } finally {
-    testBackendButton.disabled = false;
-  }
 });
 
 testMicButton.addEventListener("click", testMicrophone);

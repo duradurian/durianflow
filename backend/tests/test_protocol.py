@@ -1,7 +1,7 @@
 import pytest
 
 from app.config import Settings
-from app.websocket import validate_start_message
+from app.worker_protocol import validate_start_message
 
 
 def test_valid_start_message() -> None:

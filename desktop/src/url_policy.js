@@ -28,13 +28,6 @@ function sanitizeUrl(value, fallback, options) {
   return url.toString();
 }
 
-function sanitizeBackendUrl(value, fallback, allowRemote) {
-  return sanitizeUrl(value, fallback, {
-    protocols: ["ws:", "wss:"],
-    allowRemote,
-  });
-}
-
 function sanitizeHttpServiceUrl(value, fallback, allowRemote) {
   return sanitizeUrl(value, fallback, {
     protocols: ["http:", "https:"],
@@ -44,6 +37,5 @@ function sanitizeHttpServiceUrl(value, fallback, allowRemote) {
 
 module.exports = {
   isLocalHost,
-  sanitizeBackendUrl,
   sanitizeHttpServiceUrl,
 };

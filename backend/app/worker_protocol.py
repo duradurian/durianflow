@@ -17,7 +17,7 @@ from typing import Any, BinaryIO
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.websocket import validate_start_message
+from app.schemas import StartMessage
 
 PROTOCOL_VERSION = 1
 MAX_CONTROL_BYTES = 64 * 1024
@@ -27,6 +27,17 @@ MAX_FRAME_BYTES = MAX_CONTROL_BYTES + (MAX_AUDIO_BYTES * 4 // 3) + 1024
 
 class ProtocolError(ValueError):
     """An invalid record; callers must fail the stream closed."""
+
+
+def validate_start_message(raw: Any, settings: Settings) -> StartMessage:
+    message = StartMessage.model_validate(raw)
+    if (
+        message.sample_rate != settings.SAMPLE_RATE
+        or message.channels != settings.CHANNELS
+        or message.format != "pcm_s16le"
+    ):
+        raise ValueError("Expected pcm_s16le, mono, 16000 Hz audio.")
+    return message
 
 
 def read_record(stream: BinaryIO) -> dict[str, Any] | None:

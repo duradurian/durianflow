@@ -243,41 +243,12 @@
       <header>
         <div>
           <h1>Advanced Settings</h1>
-          <div class="subtitle">Backend, startup, and writing assistance configuration.</div>
+          <div class="subtitle">Writing assistance configuration.</div>
         </div>
       </header>
 
       <form id="advanced-form">
         <div class="content">
-          <section class="panel">
-            <h2>Backend</h2>
-            <div class="grid">
-              <label class="wide">
-                WebSocket URL
-                <input id="backendUrl" name="backendUrl" autocomplete="off" spellcheck="false">
-              </label>
-              <label class="wide">
-                Backend health check URL
-                <input id="healthUrl" name="healthUrl" autocomplete="off" spellcheck="false">
-              </label>
-              <label class="wide">
-                Backend API token
-                <input id="backendApiToken" name="backendApiToken" type="password" autocomplete="off" spellcheck="false">
-              </label>
-              <label class="option wide">
-                <input id="allowRemoteBackend" name="allowRemoteBackend" type="checkbox">
-                <span>
-                  Allow remote backend URLs
-                  <span class="helper">Keep off for normal local desktop use. Remote backends should use server mode and API tokens.</span>
-                </span>
-              </label>
-              <label class="option wide">
-                <input id="autoStartBackend" name="autoStartBackend" type="checkbox">
-                <span>Start backend automatically</span>
-              </label>
-            </div>
-          </section>
-
           <section class="panel">
             <h2>Writing Assistance</h2>
             <label class="option">
@@ -358,7 +329,6 @@
             <div id="version-message" class="helper">Version loading</div>
           </div>
           <div class="actions">
-            <button id="test-backend" type="button">Test Backend</button>
             <button id="reset-advanced" type="button">Reset</button>
           </div>
         </footer>

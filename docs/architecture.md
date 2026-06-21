@@ -1,164 +1,63 @@
 # Architecture
 
-Openflow is a local dictation stack. The backend owns API validation, transcription sessions, VAD, faster-whisper inference, and transcript event generation. The desktop client owns the Windows hotkey, microphone capture, and text insertion.
+Openflow is a Windows push-to-talk dictation application. Its local path is main-brokered: the sandboxed Electron recorder captures microphone audio, Electron main validates and routes it, and a supervised Python worker performs VAD and faster-whisper inference over stdio.
+
+## Default local dictation path
+
+```mermaid
+flowchart LR
+  User[User / focused application] --> Main[Electron main]
+  Main -->|fixed IPC| Preload[preload/contextBridge]
+  Preload --> Recorder[Sandboxed recorder renderer]
+  Recorder -->|PCM16 chunks| Preload
+  Preload --> Main
+  Main -->|bounded framed stdio| Worker[Python transcription worker]
+  Worker --> Core[Session / VAD / faster-whisper]
+  Core --> Worker
+  Worker -->|status / partial / final| Main
+  Main --> Preload
+  Main -->|refine and paste| User
+```
+
+The recorder has no backend URL, API token, raw IPC primitive, or network connection. It captures and downsamples audio to mono PCM16 at 16 kHz, then uses the narrow `window.openflow.dictation` bridge.
 
 ## Components
 
-- FastAPI app: exposes `/health`, `/v1/models`, and `/v1/transcribe`.
-- WebSocket handler: validates control messages, accepts PCM audio frames, and returns JSON events.
-- Session: manages rolling buffers, VAD state, partial/final triggers, and duplicate cleanup.
-- Transcriber: owns faster-whisper model loading and inference.
-- Scripts: provide local file transcription, WAV streaming, and model benchmarking.
-- Electron main process: registers the global hotkey, starts the backend, manages the tray menu, optionally refines finalized text with llama.cpp or Ollama, and pastes text into the focused app.
-- Electron recorder renderer: captures microphone audio, converts it to `pcm_s16le` mono 16 kHz, and streams it to the backend WebSocket.
+| Component | Responsibility |
+| --- | --- |
+| `desktop/src/main.js` | Hotkey, tray, dictation lifecycle, IPC validation, worker launch, transcript routing, LLM refinement, clipboard/paste. |
+| `desktop/src/preload.js` | Fixed contextBridge APIs and event subscriptions; no generic IPC access. |
+| `desktop/src/recorder.js` | Microphone capture, PCM conversion, bounded pending sends, and local transcript UX. |
+| `desktop/src/worker_supervisor.js` | Python child-process lifecycle, bounded framed I/O, stderr ring buffer, readiness timeout, and shutdown. |
+| `desktop/src/local_worker_transport.js` | Session/generation tracking, worker credits, and `start`/`audio`/`stop`/`cancel` commands. |
+| `backend/app/worker.py` | Async model load, command intake, session orchestration, stale-result suppression, and protocol events. |
+| `backend/app/worker_protocol.py` | Versioned, bounded four-byte length-prefixed JSON framing and command validation. |
+| `backend/app/session.py` | VAD, rolling buffers, partial/final inference triggers, and overlap cleanup. |
 
-## Repository Architecture
+## Worker protocol and lifecycle
 
-This component map covers the complete repository: application entry points, desktop processes, backend runtime, persistence, and optional integrations. Solid arrows represent runtime calls or data flow; dotted arrows are configuration or deployment relationships.
+Electron main and the Python worker use protocol version 1. Each stdin/stdout record is a four-byte big-endian length followed by a UTF-8 JSON object. Worker stdout is protocol-only; logs go to stderr.
 
-```mermaid
-flowchart TB
-  User["User / focused Windows application"]
+Audio is base64-encoded PCM16 within a bounded JSON record. This is intentionally conservative for the initial sidecar implementation. The worker validates envelope version, command type, session ID, generation, sequence, audio encoding, size, and format before audio conversion.
 
-  subgraph Desktop["desktop/ — Electron client"]
-    Electron["src/main.js\nElectron main process"]
-    Preload["src/preload.js\ncontextBridge IPC boundary"]
-    Recorder["src/recorder.js\nhidden recorder renderer"]
-    Views["settings.js · advanced_settings.js · status.js\nHTML renderer views"]
-    DesktopConfig["userData/config.json\npersisted desktop settings"]
-    Policies["url_policy.js · window_security.js\nproduct_identity.js"]
-    LLM["text_processor.js\noptional text refinement"]
-  end
-
-  subgraph Backend["backend/ — FastAPI transcription service"]
-    Launcher["scripts/run_server.py\nrun_backend.ps1 / .bat"]
-    Main["app/main.py\nFastAPI composition + lifespan"]
-    HTTP["GET /health · GET /v1/models"]
-    WS["app/websocket.py\nWS /v1/transcribe"]
-    Security["app/security.py\ntrust, origin, token policy"]
-    Schemas["app/schemas.py\nprotocol/domain models"]
-    Session["app/session.py\nstreaming utterance orchestration"]
-    Audio["app/audio.py · app/vad.py\nPCM conversion + energy VAD"]
-    Merge["app/merge.py · app/metrics.py\ndedupe + session measurements"]
-    Transcriber["app/transcriber.py\nWhisper inference adapter"]
-    ModelStore["app/model_store.py\nmodel source / cache resolution"]
-    Settings["app/config.py\nPydantic settings from .env"]
-    CUDA["app/cuda_runtime.py\nWindows CUDA DLL setup"]
-  end
-
-  subgraph Tools["backend/scripts — operational tools"]
-    Install["install_model.py"]
-    FileTx["transcribe_file.py"]
-    Stream["stream_wav.py"]
-    Bench["benchmark_models.py"]
-  end
-
-  OS["Windows / Electron APIs\nhotkey · tray · microphone · clipboard/paste"]
-  Whisper["faster-whisper / CTranslate2\nWhisperModel"]
-  Models["Local model directory\nor permitted Hugging Face download"]
-  GPU["NVIDIA CUDA runtime / GPU"]
-  Llama["llama.cpp server\n/v1/chat/completions"]
-  Ollama["Ollama server\n/api/chat and model APIs"]
-  Docker["docker-compose.yml + Dockerfile\nGPU backend deployment"]
-
-  User --> Electron
-  Electron <--> Preload
-  Preload <--> Recorder
-  Preload <--> Views
-  Electron -. load/save .-> DesktopConfig
-  Electron --> Policies
-  Electron <--> OS
-  Recorder -->|start JSON + PCM frames| WS
-  WS -->|events| Recorder
-  Electron -->|health check / optional auto-start| Launcher
-  Electron -->|optional finalized text| LLM
-  LLM --> Llama
-  LLM --> Ollama
-
-  Launcher --> Main
-  Settings -. configure .-> Main
-  Settings -. configure .-> Security
-  Settings -. configure .-> Session
-  Settings -. configure .-> Transcriber
-  Main --> HTTP
-  Main --> WS
-  Main -->|background load + shared inference semaphore| Transcriber
-  HTTP --> Security
-  WS --> Security
-  WS --> Schemas
-  WS --> Session
-  Session --> Audio
-  Session --> Merge
-  Session --> Schemas
-  Session -->|partial/final inference| Transcriber
-  Transcriber --> ModelStore
-  Transcriber --> CUDA
-  Transcriber --> Whisper
-  ModelStore --> Models
-  CUDA --> GPU
-
-  Install --> ModelStore
-  FileTx --> Audio
-  FileTx --> Transcriber
-  Stream -->|same WebSocket protocol| WS
-  Bench --> Transcriber
-  Docker -. environment + model volume .-> Main
-  Docker -. NVIDIA runtime .-> GPU
+```text
+worker: stopped -> starting -> ready
+model:  loading -> ready | unavailable
+session: idle -> recording -> stopping -> idle
+                         -> canceling -> idle
 ```
 
-The backend has no transcript database: audio buffers, VAD state, metrics, and generated events live only for the active WebSocket session. Model files and the Electron configuration file are the durable application state.
+`stop` drains accepted audio and finalizes the utterance. `cancel` discards the session; Electron main ignores events for canceled or superseded generations. Cancellation cannot interrupt native inference already executing in a worker thread, so stale transcript suppression is authoritative.
 
-## Live Transcription Flow
+## Limits and trust boundaries
 
-```mermaid
-sequenceDiagram
-  participant Client
-  participant Socket
-  participant Session
-  participant VAD
-  participant Model
-  Client->>Socket: start JSON
-  Socket->>Session: create session
-  Socket->>Client: ready
-  loop audio frames
-    Client->>Socket: binary PCM
-    Socket->>Session: accept_pcm16
-    Session->>VAD: process frame
-    alt active speech and partial interval elapsed
-      Session->>Model: transcribe rolling window
-      Session->>Client: partial
-    end
-    alt silence threshold reached
-      Session->>Model: transcribe speech buffer
-      Session->>Client: final
-    end
-  end
-  Client->>Socket: stop
-  Socket->>Session: finalize active speech
-  Socket->>Client: stopped
-```
+* Worker records and PCM frames are size-bounded before decoding or processing.
+* Electron main maintains bounded write queues and honors child-stdin backpressure.
+* The renderer limits unresolved audio submissions and drops newest audio under pressure rather than growing memory without bound.
+* Only the hidden recorder window may invoke dictation IPC handlers; Electron main validates the sender, payload, and lifecycle state.
+* The worker is launched with `shell: false`, piped stdio, a small environment, and no local listening port.
+* The Python sidecar is not an OS sandbox. Packaging, code signing, model verification, and stronger Windows containment remain production work.
 
-## Desktop Dictation Flow
+## Durable state
 
-```mermaid
-sequenceDiagram
-  participant User
-  participant Main as Electron Main
-  participant Recorder as Hidden Recorder
-  participant Backend
-  participant Target as Focused Textbox
-  User->>Target: focus textbox
-  User->>Main: press global hotkey
-  Main->>Recorder: start dictation
-  Recorder->>Backend: start JSON
-  loop microphone frames
-    Recorder->>Backend: binary PCM
-  end
-  User->>Main: press global hotkey
-  Main->>Recorder: stop dictation
-  Recorder->>Backend: stop JSON
-  Backend->>Recorder: final transcript
-  Recorder->>Main: transcript text
-  Main->>Main: optional text refinement
-  Main->>Target: paste transcript
-```
+Openflow does not store transcripts or audio. Active-session audio, VAD state, metrics, and generated events are memory-only. Durable state is limited to the Electron configuration file and model files/cache.

@@ -181,5 +181,5 @@ def _cuda_runtime_help(original_message: str) -> str:
     return (
         "CUDA runtime libraries are missing or not visible to Python. "
         f"Original error: {original_message}. "
-        "Use the provided NVIDIA Docker setup or install CUDA 12.x and cuDNN on the host."
+        "Install CUDA 12.x and cuDNN on the host."
     )
