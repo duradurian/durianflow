@@ -1,10 +1,10 @@
-# Openflow
+# Durianflow
 
 Note: App is in very early stages and has known issues. Treat it like a prototype.
 
-Openflow is a local Windows dictation app that turns speech into text in any focused textbox. It combines an Electron tray client with a supervised local Python transcription worker powered by `faster-whisper` and CTranslate2.
+Durianflow is a local Windows dictation app that turns speech into text in any focused textbox. It combines an Electron tray client with a supervised local Python transcription worker powered by `faster-whisper` and CTranslate2.
 
-Openflow does not use the hosted OpenAI API. Speech recognition runs on your own machine or server.
+Durianflow does not use the hosted OpenAI API. Speech recognition runs on your own machine or server.
 
 ## Features
 
@@ -49,9 +49,9 @@ Then:
 2. Press `Ctrl+Alt+Space`.
 3. Speak.
 4. Press `Ctrl+Alt+Space` again, or release it if hold mode is enabled.
-5. Openflow pastes the finalized transcript into the focused textbox.
+5. Durianflow pastes the finalized transcript into the focused textbox.
 
-Before the first transcription, Openflow can download and cache the configured Whisper model automatically. To preinstall it explicitly:
+Before the first transcription, Durianflow can download and cache the configured Whisper model automatically. To preinstall it explicitly:
 
 ```powershell
 cd backend
@@ -161,7 +161,7 @@ Supported refinement modes are:
 - `format`: format dictated text for readability.
 - `enhance`: lightly improve phrasing.
 
-If the LLM server is unavailable or too slow, Openflow inserts the original transcript.
+If the LLM server is unavailable or too slow, Durianflow inserts the original transcript.
 
 ## Development Checks
 
@@ -188,7 +188,7 @@ npm run check
 
 ## Known Limitations
 
-- Whisper is not true token streaming; Openflow uses rolling-window re-transcription for partial results.
+- Whisper is not true token streaming; Durianflow uses rolling-window re-transcription for partial results.
 - VAD is energy-based and intentionally simple.
 - Clients are responsible for microphone capture, resampling, and valid PCM frames.
 - GPU concurrency defaults to one transcription at a time.
