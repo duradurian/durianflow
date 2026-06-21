@@ -10,6 +10,6 @@
     "check": "node --check src/main.js && node --check src/preload.js && node --check src/recorder.js && node --check src/settings.js && node --check src/advanced_settings.js && node --check src/status.js && node --check src/text_processor.js && node --check src/url_policy.js && node --check src/window_security.js && node --check src/product_identity.js && node --check src/worker_supervisor.js && node --check src/local_worker_transport.js && node --check src/dictation_transport.js"
   },
   "devDependencies": {
-    "electron": "^42.0.1"
+    "electron": "^42.4.1"
   }
 }
