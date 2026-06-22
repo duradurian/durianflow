@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, Tray, clipboard, globalShortcut, ipcMain, nati
 const { execFile, spawn } = require("child_process");
 const { randomUUID } = require("crypto");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { PRODUCT_NAME, SETTINGS_TITLE, ADVANCED_SETTINGS_TITLE } = require("./product_identity");
 const {
@@ -44,6 +45,7 @@ const DEFAULT_CONFIG = {
   selectedInputDeviceId: "",
   autoPaste: true,
   appendSpace: true,
+  computeDevice: "cuda",
   fastVoiceModel: "large-v3-turbo",
   accurateVoiceModel: "large-v3-turbo",
   llmEnabled: false,
@@ -66,6 +68,7 @@ let advancedSettingsWindow;
 let tray;
 let localWorkerTransport;
 let localWorkerModelName = null;
+let localWorkerDevice = null;
 let hotkeyWatcherProcess;
 let isRecording = false;
 let isStartingDictation = false;
@@ -159,6 +162,7 @@ function sanitizeConfig(nextConfig) {
     selectedInputDeviceId: String(source.selectedInputDeviceId || ""),
     autoPaste: booleanSetting(source.autoPaste, DEFAULT_CONFIG.autoPaste),
     appendSpace: booleanSetting(source.appendSpace, DEFAULT_CONFIG.appendSpace),
+    computeDevice: source.computeDevice === "cpu" ? "cpu" : "cuda",
     fastVoiceModel: voiceModel(source.fastVoiceModel, DEFAULT_CONFIG.fastVoiceModel),
     accurateVoiceModel: voiceModel(source.accurateVoiceModel, DEFAULT_CONFIG.accurateVoiceModel),
     llmEnabled: booleanSetting(source.llmEnabled, DEFAULT_CONFIG.llmEnabled),
@@ -839,6 +843,38 @@ async function gpuMemoryStatus() {
   };
 }
 
+async function appMemoryStatus() {
+  let electronBytes = 0;
+  try {
+    electronBytes = app.getAppMetrics().reduce((total, metric) => (
+      total + Math.max(0, Number(metric?.memory?.workingSetSize) || 0) * 1024
+    ), 0);
+  } catch {
+    electronBytes = process.memoryUsage().rss;
+  }
+
+  const workerPid = localWorkerTransport?.supervisor?.child?.pid;
+  let workerBytes = 0;
+  if (Number.isInteger(workerPid) && workerPid > 0 && process.platform === "win32") {
+    const output = await execFileText(
+      "powershell.exe",
+      ["-NoProfile", "-Command", `(Get-Process -Id ${workerPid}).WorkingSet64`],
+      1200,
+    );
+    const parsed = Number(String(output || "").trim());
+    if (Number.isFinite(parsed) && parsed > 0) workerBytes = parsed;
+  }
+
+  const used = electronBytes + workerBytes;
+  const total = os.totalmem();
+  return {
+    ok: Number.isFinite(used) && used > 0 && Number.isFinite(total) && total > 0,
+    used,
+    total,
+    percent: total > 0 ? Math.round((used / total) * 100) : 0,
+  };
+}
+
 function isRecorderSender(event) {
   return Boolean(
     recorderWindow
@@ -886,6 +922,11 @@ function workerLaunchOptions(modelName = voiceModelForMode()) {
       PYTHONUNBUFFERED: "1",
       PYTHONUTF8: "1",
       MODEL_NAME: modelName,
+      DEVICE: config.computeDevice,
+      COMPUTE_TYPE: config.computeDevice === "cpu" ? "int8" : "float16",
+      // Device selection is explicit: CUDA failures must surface instead of
+      // silently retaining a second CPU copy of the model weights.
+      FALLBACK_TO_CPU_ON_CUDA_ERROR: "false",
     },
   };
 }
@@ -998,6 +1039,7 @@ function createLocalWorkerTransport(modelName = voiceModelForMode()) {
     return localWorkerTransport;
   }
   localWorkerModelName = modelName;
+  localWorkerDevice = config.computeDevice;
   localWorkerTransport = createDictationTransport(workerLaunchOptions(modelName));
   localWorkerTransport.on("model", (event) => {
     if (recorderWindow && !recorderWindow.isDestroyed()) {
@@ -1032,10 +1074,14 @@ async function ensureLocalWorkerReady(signal, modelName = voiceModelForMode()) {
   if (modelManagementOperation) {
     throw new Error("Wait for the speech model operation to finish.");
   }
-  if (localWorkerTransport && localWorkerModelName !== modelName) {
+  if (
+    localWorkerTransport
+    && (localWorkerModelName !== modelName || localWorkerDevice !== config.computeDevice)
+  ) {
     await localWorkerTransport.shutdown();
     localWorkerTransport = null;
     localWorkerModelName = null;
+    localWorkerDevice = null;
   }
   const transport = createLocalWorkerTransport(modelName);
   if (transport.getState().worker === "stopped") {
@@ -1400,6 +1446,7 @@ trustedHandle("config:save", async (_event, nextConfig) => {
     next.fastVoiceModel !== previousConfig.fastVoiceModel
     || next.accurateVoiceModel !== previousConfig.accurateVoiceModel
     || next.mode !== previousConfig.mode
+    || next.computeDevice !== previousConfig.computeDevice
   );
   if (selectedVoiceModelChanged && !isRecording && !isStartingDictation) {
     ensureLocalWorkerReady(undefined, voiceModelForMode()).catch((error) => {
@@ -1472,9 +1519,11 @@ trustedHandle("app-status:get", async () => {
     isStartingDictation,
     worker,
     activeVoiceModel: localWorkerModelName,
+    activeComputeDevice: localWorkerDevice,
+    computeDevice: config.computeDevice,
     workerStatus: status,
     llm: llmStatus(config),
-    gpuMemory: await gpuMemoryStatus(),
+    resourceMemory: config.computeDevice === "cpu" ? await appMemoryStatus() : await gpuMemoryStatus(),
     version: app.getVersion(),
     platform: process.platform,
   };

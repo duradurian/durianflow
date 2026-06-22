@@ -24,4 +24,8 @@ supplies metadata. The app removes stale incomplete model downloads before it
 starts the worker. It can delete managed model downloads; it does not delete an
 external `MODEL_PATH`.
 
+Choose **NVIDIA GPU (CUDA)** or **CPU** in the Speech Model panel. The selected
+device restarts the local worker; CPU uses int8 inference and changes the main
+Settings resource meter from GPU memory to combined app and worker RAM.
+
 Run `npm run check` to syntax-check desktop source files.

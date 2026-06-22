@@ -15,6 +15,7 @@ const micState = document.getElementById("mic-state");
 const recordingState = document.getElementById("recording-state");
 const micMeter = document.getElementById("mic-meter");
 const gpuMemoryCard = document.getElementById("gpu-memory-card");
+const memoryLabel = document.getElementById("memory-label");
 const gpuMemoryValue = document.getElementById("gpu-memory-value");
 const gpuMemoryMeter = document.getElementById("gpu-memory-meter");
 
@@ -109,8 +110,16 @@ function setMemoryGauge(card, valueElement, meterElement, memory, unavailableTex
   card.classList.toggle("error", percent >= 90);
 }
 
-function setMemoryStatus(memory) {
-  setMemoryGauge(gpuMemoryCard, gpuMemoryValue, gpuMemoryMeter, memory, "GPU unavailable");
+function setMemoryStatus(memory, computeDevice = "cuda") {
+  const isCpu = computeDevice === "cpu";
+  memoryLabel.textContent = isCpu ? "App RAM" : "GPU Memory";
+  setMemoryGauge(
+    gpuMemoryCard,
+    gpuMemoryValue,
+    gpuMemoryMeter,
+    memory,
+    isCpu ? "RAM unavailable" : "GPU unavailable",
+  );
 }
 
 function setFormDisabled(disabled) {
@@ -467,12 +476,12 @@ async function refreshAppStatus() {
     }
 
     setLlmStatus(status.llm);
-    setMemoryStatus(status.gpuMemory);
+    setMemoryStatus(status.resourceMemory, status.computeDevice);
   } catch {
     setState(backendState, "Unknown", "error");
     setState(modelState, "Unknown", "error");
     setState(llmState, "Unknown", "error");
-    setMemoryStatus(null);
+    setMemoryStatus(null, "cuda");
   }
 }
 

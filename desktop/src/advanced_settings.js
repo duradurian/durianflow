@@ -1,4 +1,5 @@
 const DEFAULT_ADVANCED = {
+  computeDevice: "cuda",
   fastVoiceModel: "large-v3-turbo",
   accurateVoiceModel: "large-v3-turbo",
   llmEnabled: false,
@@ -17,6 +18,7 @@ const form = document.getElementById("advanced-form");
 const formMessage = document.getElementById("form-message");
 const versionMessage = document.getElementById("version-message");
 const resetAdvancedButton = document.getElementById("reset-advanced");
+const saveAdvancedButton = document.getElementById("save-advanced");
 const refreshOllamaModelsButton = document.getElementById("refresh-ollama-models");
 const speechModelSummary = document.getElementById("speech-model-summary");
 const speechModelName = document.getElementById("speech-model-name");
@@ -31,6 +33,7 @@ const refreshSpeechModelButton = document.getElementById("refresh-speech-model")
 const speechModelProfile = document.getElementById("speech-model-profile");
 
 const fields = {
+  computeDevice: document.getElementById("computeDevice"),
   fastVoiceModel: document.getElementById("fastVoiceModel"),
   accurateVoiceModel: document.getElementById("accurateVoiceModel"),
   llmEnabled: document.getElementById("llmEnabled"),
@@ -50,9 +53,7 @@ const ADVANCED_CONFIG_KEYS = Object.keys(fields);
 let currentConfig = null;
 let savedSnapshot = "";
 let llmPreloadGeneration = 0;
-let autoSaveTimer = null;
 let isSaving = false;
-let saveQueuedDuringRequest = false;
 let formRevision = 0;
 let speechModelStatus = null;
 let speechModelOperation = false;
@@ -67,6 +68,7 @@ function setFormDisabled(disabled) {
     element.disabled = disabled;
   }
   resetAdvancedButton.disabled = disabled;
+  saveAdvancedButton.disabled = disabled || !isDirty();
   refreshOllamaModelsButton.disabled = disabled;
   speechModelProfile.disabled = disabled;
   setSpeechModelControlsDisabled(disabled || speechModelOperation);
@@ -95,8 +97,9 @@ function formatDuration(value) {
 function setSpeechModelControlsDisabled(disabled) {
   const installed = Boolean(speechModelStatus?.installed);
   const canDelete = Boolean(speechModelStatus?.canDelete);
-  downloadSpeechModelButton.disabled = disabled || installed;
-  deleteSpeechModelButton.disabled = disabled || !canDelete;
+  const hasUnsavedChanges = Boolean(currentConfig && isDirty());
+  downloadSpeechModelButton.disabled = disabled || installed || hasUnsavedChanges;
+  deleteSpeechModelButton.disabled = disabled || !canDelete || hasUnsavedChanges;
   refreshSpeechModelButton.disabled = disabled;
 }
 
@@ -155,6 +158,10 @@ async function refreshSpeechModelStatus(options = {}) {
 }
 
 async function downloadSpeechModel() {
+  if (isDirty()) {
+    setMessage("Save changes before downloading a speech model.", "error");
+    return;
+  }
   speechModelOperation = true;
   setSpeechModelControlsDisabled(true);
   renderSpeechModelStatus({ type: "started", message: "Starting model download", downloadedBytes: 0 });
@@ -170,6 +177,10 @@ async function downloadSpeechModel() {
 }
 
 async function deleteSpeechModel() {
+  if (isDirty()) {
+    setMessage("Save changes before deleting a speech model.", "error");
+    return;
+  }
   if (!speechModelStatus?.canDelete) return;
   if (!window.confirm(`Delete ${speechModelStatus.model || "the speech model"}? You will need to download it again before dictation can use it.`)) {
     return;
@@ -198,6 +209,7 @@ function readAdvancedConfig() {
 
   return {
     ...currentConfig,
+    computeDevice: fields.computeDevice.value,
     fastVoiceModel: fields.fastVoiceModel.value,
     accurateVoiceModel: fields.accurateVoiceModel.value,
     llmEnabled: fields.llmEnabled.checked,
@@ -223,6 +235,7 @@ function changedConfigPatch(nextConfig) {
 
 function snapshotConfig(config) {
   return JSON.stringify({
+    computeDevice: config.computeDevice,
     fastVoiceModel: config.fastVoiceModel,
     accurateVoiceModel: config.accurateVoiceModel,
     llmEnabled: Boolean(config.llmEnabled),
@@ -244,39 +257,15 @@ function isDirty() {
 
 function updateDirtyState() {
   const dirty = isDirty();
+  saveAdvancedButton.disabled = isSaving || !dirty;
+  setSpeechModelControlsDisabled(speechModelOperation);
   if (!isSaving) {
-    setMessage(dirty ? "Saving changes" : "Saved", dirty ? "" : "ok");
+    setMessage(dirty ? "Unsaved changes — save before continuing" : "Saved", dirty ? "" : "ok");
   }
-}
-
-function queueAutoSave({ immediate = false } = {}) {
-  clearTimeout(autoSaveTimer);
-
-  if (!currentConfig || !isDirty()) {
-    if (!isSaving) {
-      updateDirtyState();
-    }
-    return;
-  }
-
-  if (!form.checkValidity()) {
-    setMessage("Complete valid settings before they can be saved.", "error");
-    return;
-  }
-
-  if (isSaving) {
-    saveQueuedDuringRequest = true;
-    return;
-  }
-
-  setMessage("Saving changes");
-  autoSaveTimer = setTimeout(savePendingChanges, immediate ? 0 : 350);
 }
 
 async function savePendingChanges() {
-  autoSaveTimer = null;
   if (isSaving) {
-    saveQueuedDuringRequest = true;
     return;
   }
   if (!currentConfig || !isDirty()) {
@@ -291,15 +280,12 @@ async function savePendingChanges() {
   const configToSave = readAdvancedConfig();
   const submittedRevision = formRevision;
   let saveCompleted = false;
-  let hotkeyRegistered = true;
   isSaving = true;
-  saveQueuedDuringRequest = false;
   setMessage("Saving changes");
 
   try {
     const response = await window.openflow.saveConfig(changedConfigPatch(configToSave));
     saveCompleted = true;
-    hotkeyRegistered = response.hotkeyRegistered;
     if (submittedRevision === formRevision) {
       writeFormConfig(response.config, true);
     } else {
@@ -310,24 +296,20 @@ async function savePendingChanges() {
       response.hotkeyRegistered ? "Saved" : "Settings saved, but hotkey is unavailable",
       response.hotkeyRegistered ? "ok" : "error",
     );
+    preloadSelectedOllamaModel();
   } catch (error) {
     setMessage(error.message || "Could not save changes", "error");
   } finally {
     isSaving = false;
-    const shouldSaveLatest = saveQueuedDuringRequest || (saveCompleted && isDirty());
-    saveQueuedDuringRequest = false;
-    if (shouldSaveLatest) {
-      queueAutoSave();
-    } else if (saveCompleted && hotkeyRegistered) {
+    if (saveCompleted) {
       updateDirtyState();
     }
   }
 }
 
-function noteFormChange(options) {
+function noteFormChange() {
   formRevision += 1;
   updateDirtyState();
-  queueAutoSave(options);
 }
 
 function syncLlmProviderFields() {
@@ -364,6 +346,7 @@ function setOllamaModelOptions(models, selectedModel = "") {
 
 function writeFormConfig(config, markSaved = false) {
   currentConfig = config;
+  fields.computeDevice.value = config.computeDevice || DEFAULT_ADVANCED.computeDevice;
   fields.fastVoiceModel.value = config.fastVoiceModel || DEFAULT_ADVANCED.fastVoiceModel;
   fields.accurateVoiceModel.value = config.accurateVoiceModel || DEFAULT_ADVANCED.accurateVoiceModel;
   fields.llmEnabled.checked = Boolean(config.llmEnabled);
@@ -411,8 +394,7 @@ async function refreshOllamaModels(options = {}) {
     const previousModel = fields.ollamaModel.value;
     setOllamaModelOptions(result.models || [], previousModel);
     if (fields.ollamaModel.value !== previousModel) {
-      noteFormChange({ immediate: true });
-      preloadSelectedOllamaModel();
+      noteFormChange();
     }
     if (!options.silent) {
       setMessage(result.ok ? `Found ${result.models.length} Ollama model(s)` : result.message || "No Ollama models found", result.ok ? "ok" : "error");
@@ -461,16 +443,7 @@ fields.llmProvider.addEventListener("change", () => {
   syncLlmProviderFields();
   if (fields.llmProvider.value === "ollama") {
     refreshOllamaModels({ silent: true });
-    preloadSelectedOllamaModel();
   }
-});
-
-fields.llmEnabled.addEventListener("change", () => {
-  preloadSelectedOllamaModel();
-});
-
-fields.ollamaModel.addEventListener("change", () => {
-  preloadSelectedOllamaModel();
 });
 
 refreshOllamaModelsButton.addEventListener("click", refreshOllamaModels);
@@ -496,12 +469,12 @@ fields.accurateVoiceModel.addEventListener("change", () => {
 
 resetAdvancedButton.addEventListener("click", () => {
   writeFormConfig({ ...currentConfig, ...DEFAULT_ADVANCED });
-  noteFormChange({ immediate: true });
+  noteFormChange();
 });
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
-  queueAutoSave({ immediate: true });
+  savePendingChanges();
 });
 
 window.openflow.onConfigUpdated((nextConfig) => {

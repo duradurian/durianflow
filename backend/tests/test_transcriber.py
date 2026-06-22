@@ -43,6 +43,36 @@ def test_cuda_load_can_fallback_to_cpu(monkeypatch, tmp_path) -> None:
     assert transcriber.active_compute_type == "int8"
 
 
+def test_explicit_cuda_does_not_fallback_to_cpu(monkeypatch, tmp_path) -> None:
+    calls = []
+
+    class FakeWhisperModel:
+        def __init__(self, source, **kwargs):
+            calls.append((source, kwargs.copy()))
+            raise RuntimeError("cublas64_12.dll was not found")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=FakeWhisperModel))
+    monkeypatch.setattr("app.transcriber.configure_cuda_dll_paths", lambda: [])
+    transcriber = WhisperTranscriber(
+        Settings(
+            _env_file=None,
+            MODEL_NAME="tiny",
+            MODELS_DIR=str(tmp_path),
+            ALLOW_MODEL_DOWNLOAD=True,
+            DEVICE="cuda",
+            COMPUTE_TYPE="float16",
+            FALLBACK_TO_CPU_ON_CUDA_ERROR=False,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="cublas64_12.dll"):
+        transcriber.load()
+
+    assert len(calls) == 1
+    assert calls[0][1]["device"] == "cuda"
+    assert not transcriber.model_loaded
+
+
 def test_model_source_errors_populate_load_error(monkeypatch, tmp_path) -> None:
     fake_module = types.SimpleNamespace(WhisperModel=object)
     monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
