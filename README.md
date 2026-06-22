@@ -5,7 +5,7 @@ Note: The app was built for my side quests where he realized I didn't want to us
 
 Durianflow is a local Windows dictation app that turns speech into text in any focused textbox. It combines an Electron tray client with a supervised local Python transcription worker powered by `faster-whisper` and CTranslate2.
 
-Durianflow does not use the hosted OpenAI API. Speech recognition runs on your own machine or server. 
+Durianflow does not use the hosted OpenAI API. Speech recognition runs on your own machine or server. The app should be compatible with most openai compatible endpoints; I personally haven't tested it beyond trying Ollama and Unsloth but it seems to work pretty well. A cool idea would be to create a fine tuned model for each diction option that meets your needs. I personally have some prototypes of fine tuned qwen3.5:9b for the format diction option and it seems to show less hallucination when thinking is turned off relative to the base model, though, it is to be benchmarked.
 
 ## Features
 
