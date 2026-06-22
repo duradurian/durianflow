@@ -109,7 +109,7 @@ The app includes:
 
 - Tray menu and status window.
 - Main settings for hotkey, input behavior, microphone, language, transcription mode, and paste behavior.
-- Advanced settings for backend URLs, automatic backend startup, and optional local LLM refinement.
+- Advanced settings for separate fast/accurate faster-whisper model profiles, managed downloads, cleanup, and optional local LLM refinement.
 
 See [desktop/README.md](desktop/README.md) for the full desktop configuration reference.
 

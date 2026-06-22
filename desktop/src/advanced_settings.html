@@ -200,6 +200,50 @@
         gap: 7px;
       }
 
+      .model-metrics {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .metric {
+        display: grid;
+        gap: 3px;
+        min-width: 0;
+        padding: 8px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-muted);
+      }
+
+      .metric span {
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 650;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      .metric strong {
+        overflow: hidden;
+        color: var(--text-strong);
+        font-size: 12px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      progress {
+        width: 100%;
+        height: 10px;
+        accent-color: var(--accent);
+      }
+
+      .model-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+      }
+
       button {
         min-height: 32px;
         padding: 0 11px;
@@ -218,6 +262,11 @@
         color: var(--primary-text);
       }
 
+      button.danger {
+        border-color: var(--danger);
+        color: var(--danger);
+      }
+
       button:disabled,
       input:disabled,
       select:disabled {
@@ -226,6 +275,10 @@
       }
 
       .message.error {
+        color: var(--danger);
+      }
+
+      .helper.error {
         color: var(--danger);
       }
 
@@ -249,6 +302,58 @@
 
       <form id="advanced-form">
         <div class="content">
+          <section class="panel">
+            <h2>Speech Model</h2>
+            <div class="grid">
+              <label>
+                Fast dictation model
+                <select id="fastVoiceModel" name="fastVoiceModel">
+                  <option value="tiny">Tiny</option>
+                  <option value="base">Base</option>
+                  <option value="small">Small</option>
+                  <option value="medium">Medium</option>
+                  <option value="distil-large-v3">Distil Large v3</option>
+                  <option value="large-v3-turbo">Large v3 Turbo</option>
+                  <option value="large-v3">Large v3</option>
+                </select>
+              </label>
+              <label>
+                Accurate dictation model
+                <select id="accurateVoiceModel" name="accurateVoiceModel">
+                  <option value="tiny">Tiny</option>
+                  <option value="base">Base</option>
+                  <option value="small">Small</option>
+                  <option value="medium">Medium</option>
+                  <option value="distil-large-v3">Distil Large v3</option>
+                  <option value="large-v3-turbo">Large v3 Turbo</option>
+                  <option value="large-v3">Large v3</option>
+                </select>
+              </label>
+            </div>
+            <label>
+              Manage profile
+              <select id="speech-model-profile">
+                <option value="fast">Fast dictation model</option>
+                <option value="accurate">Accurate dictation model</option>
+              </select>
+              <span class="helper">The selected profile is downloaded, deleted, and loaded before its next dictation session.</span>
+            </label>
+            <div id="speech-model-summary" class="helper">Checking model status…</div>
+            <div class="model-metrics">
+              <div class="metric"><span>Model</span><strong id="speech-model-name">—</strong></div>
+              <div class="metric"><span>Stored</span><strong id="speech-model-size">—</strong></div>
+              <div class="metric"><span>Free disk</span><strong id="speech-model-free">—</strong></div>
+            </div>
+            <progress id="speech-model-progress" max="1" value="0"></progress>
+            <div id="speech-model-progress-text" class="helper">No active download.</div>
+            <div class="model-actions">
+              <button id="download-speech-model" class="primary" type="button">Download model</button>
+              <button id="delete-speech-model" class="danger" type="button">Delete download</button>
+              <button id="refresh-speech-model" type="button">Refresh</button>
+            </div>
+            <div id="speech-model-location" class="helper"></div>
+          </section>
+
           <section class="panel">
             <h2>Writing Assistance</h2>
             <label class="option">
@@ -321,6 +426,7 @@
               </label>
             </div>
           </section>
+
         </div>
 
         <footer class="footer">

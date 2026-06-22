@@ -1,4 +1,6 @@
 const DEFAULT_ADVANCED = {
+  fastVoiceModel: "large-v3-turbo",
+  accurateVoiceModel: "large-v3-turbo",
   llmEnabled: false,
   llmProvider: "llamacpp",
   llmServerUrl: "http://localhost:8080/v1/chat/completions",
@@ -16,8 +18,21 @@ const formMessage = document.getElementById("form-message");
 const versionMessage = document.getElementById("version-message");
 const resetAdvancedButton = document.getElementById("reset-advanced");
 const refreshOllamaModelsButton = document.getElementById("refresh-ollama-models");
+const speechModelSummary = document.getElementById("speech-model-summary");
+const speechModelName = document.getElementById("speech-model-name");
+const speechModelSize = document.getElementById("speech-model-size");
+const speechModelFree = document.getElementById("speech-model-free");
+const speechModelProgress = document.getElementById("speech-model-progress");
+const speechModelProgressText = document.getElementById("speech-model-progress-text");
+const speechModelLocation = document.getElementById("speech-model-location");
+const downloadSpeechModelButton = document.getElementById("download-speech-model");
+const deleteSpeechModelButton = document.getElementById("delete-speech-model");
+const refreshSpeechModelButton = document.getElementById("refresh-speech-model");
+const speechModelProfile = document.getElementById("speech-model-profile");
 
 const fields = {
+  fastVoiceModel: document.getElementById("fastVoiceModel"),
+  accurateVoiceModel: document.getElementById("accurateVoiceModel"),
   llmEnabled: document.getElementById("llmEnabled"),
   llmProvider: document.getElementById("llmProvider"),
   llmServerUrl: document.getElementById("llmServerUrl"),
@@ -39,6 +54,8 @@ let autoSaveTimer = null;
 let isSaving = false;
 let saveQueuedDuringRequest = false;
 let formRevision = 0;
+let speechModelStatus = null;
+let speechModelOperation = false;
 
 function setMessage(message, type = "") {
   formMessage.textContent = message;
@@ -51,6 +68,124 @@ function setFormDisabled(disabled) {
   }
   resetAdvancedButton.disabled = disabled;
   refreshOllamaModelsButton.disabled = disabled;
+  speechModelProfile.disabled = disabled;
+  setSpeechModelControlsDisabled(disabled || speechModelOperation);
+}
+
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "Unknown";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let size = bytes / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && size >= 1024; index += 1) {
+    size /= 1024;
+    unit = units[index];
+  }
+  return `${size >= 10 ? size.toFixed(1) : size.toFixed(2)} ${unit}`;
+}
+
+function formatDuration(value) {
+  const seconds = Math.max(0, Number(value) || 0);
+  if (seconds < 60) return `${Math.floor(seconds)}s`;
+  return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
+}
+
+function setSpeechModelControlsDisabled(disabled) {
+  const installed = Boolean(speechModelStatus?.installed);
+  const canDelete = Boolean(speechModelStatus?.canDelete);
+  downloadSpeechModelButton.disabled = disabled || installed;
+  deleteSpeechModelButton.disabled = disabled || !canDelete;
+  refreshSpeechModelButton.disabled = disabled;
+}
+
+function selectedSpeechModel() {
+  return speechModelProfile.value === "accurate"
+    ? fields.accurateVoiceModel.value
+    : fields.fastVoiceModel.value;
+}
+
+function renderSpeechModelStatus(status) {
+  if (!status || typeof status !== "object") return;
+  speechModelStatus = { ...speechModelStatus, ...status };
+  const current = speechModelStatus;
+  speechModelName.textContent = current.model || "Configured model";
+  speechModelSize.textContent = current.installed
+    ? formatBytes(current.sizeBytes)
+    : current.downloadedBytes ? `${formatBytes(current.downloadedBytes)} cached` : "Not installed";
+  speechModelFree.textContent = formatBytes(current.freeBytes);
+  speechModelLocation.textContent = current.path ? `Location: ${current.path}` : "";
+  speechModelSummary.textContent = current.message || (current.installed ? "Installed" : "Not installed");
+  speechModelSummary.className = `helper ${current.type === "error" ? "error" : ""}`.trim();
+
+  const downloaded = Number(current.downloadedBytes) || 0;
+  const total = Number(current.totalBytes) || 0;
+  if (total > 0) {
+    speechModelProgress.max = total;
+    speechModelProgress.value = Math.min(downloaded, total);
+  } else {
+    speechModelProgress.removeAttribute("value");
+  }
+  if (current.type === "progress") {
+    const pieces = [`${formatBytes(downloaded)} downloaded`];
+    if (total > 0) pieces.push(`of ${formatBytes(total)} (${Math.min(100, (downloaded / total) * 100).toFixed(1)}%)`);
+    if (current.speedBytesPerSecond) pieces.push(`${formatBytes(current.speedBytesPerSecond)}/s`);
+    if (current.elapsedSeconds) pieces.push(formatDuration(current.elapsedSeconds));
+    speechModelProgressText.textContent = pieces.join(" · ");
+  } else if (current.installed) {
+    speechModelProgress.value = 1;
+    speechModelProgress.max = 1;
+    speechModelProgressText.textContent = `Installed size: ${formatBytes(current.sizeBytes)}`;
+  } else {
+    speechModelProgressText.textContent = total > 0
+      ? `Download size: ${formatBytes(total)}`
+      : "Download size will be shown when the model host provides it.";
+  }
+  setSpeechModelControlsDisabled(speechModelOperation);
+}
+
+async function refreshSpeechModelStatus(options = {}) {
+  if (!options.silent) speechModelSummary.textContent = "Checking model status…";
+  try {
+    renderSpeechModelStatus(await window.openflow.getSpeechModelStatus(selectedSpeechModel()));
+  } catch (error) {
+    renderSpeechModelStatus({ type: "error", message: error.message || "Could not inspect speech model" });
+  }
+}
+
+async function downloadSpeechModel() {
+  speechModelOperation = true;
+  setSpeechModelControlsDisabled(true);
+  renderSpeechModelStatus({ type: "started", message: "Starting model download", downloadedBytes: 0 });
+  try {
+    renderSpeechModelStatus(await window.openflow.downloadSpeechModel(selectedSpeechModel()));
+  } catch (error) {
+    renderSpeechModelStatus({ type: "error", message: error.message || "Model download failed" });
+  } finally {
+    speechModelOperation = false;
+    setSpeechModelControlsDisabled(false);
+    refreshSpeechModelStatus({ silent: true });
+  }
+}
+
+async function deleteSpeechModel() {
+  if (!speechModelStatus?.canDelete) return;
+  if (!window.confirm(`Delete ${speechModelStatus.model || "the speech model"}? You will need to download it again before dictation can use it.`)) {
+    return;
+  }
+  speechModelOperation = true;
+  setSpeechModelControlsDisabled(true);
+  renderSpeechModelStatus({ type: "started", message: "Deleting model download" });
+  try {
+    renderSpeechModelStatus(await window.openflow.deleteSpeechModel(selectedSpeechModel()));
+  } catch (error) {
+    renderSpeechModelStatus({ type: "error", message: error.message || "Could not delete the model" });
+  } finally {
+    speechModelOperation = false;
+    setSpeechModelControlsDisabled(false);
+    refreshSpeechModelStatus({ silent: true });
+  }
 }
 
 function readAdvancedConfig() {
@@ -63,6 +198,8 @@ function readAdvancedConfig() {
 
   return {
     ...currentConfig,
+    fastVoiceModel: fields.fastVoiceModel.value,
+    accurateVoiceModel: fields.accurateVoiceModel.value,
     llmEnabled: fields.llmEnabled.checked,
     llmProvider: fields.llmProvider.value,
     llmServerUrl: fields.llmServerUrl.value.trim(),
@@ -86,6 +223,8 @@ function changedConfigPatch(nextConfig) {
 
 function snapshotConfig(config) {
   return JSON.stringify({
+    fastVoiceModel: config.fastVoiceModel,
+    accurateVoiceModel: config.accurateVoiceModel,
     llmEnabled: Boolean(config.llmEnabled),
     llmProvider: config.llmProvider,
     llmServerUrl: config.llmServerUrl,
@@ -225,6 +364,8 @@ function setOllamaModelOptions(models, selectedModel = "") {
 
 function writeFormConfig(config, markSaved = false) {
   currentConfig = config;
+  fields.fastVoiceModel.value = config.fastVoiceModel || DEFAULT_ADVANCED.fastVoiceModel;
+  fields.accurateVoiceModel.value = config.accurateVoiceModel || DEFAULT_ADVANCED.accurateVoiceModel;
   fields.llmEnabled.checked = Boolean(config.llmEnabled);
   fields.llmProvider.value = config.llmProvider || DEFAULT_ADVANCED.llmProvider;
   fields.llmServerUrl.value = config.llmServerUrl || DEFAULT_ADVANCED.llmServerUrl;
@@ -253,6 +394,7 @@ async function loadSettings() {
 
   setFormDisabled(false);
   updateDirtyState();
+  refreshSpeechModelStatus({ silent: true });
   if (fields.llmProvider.value === "ollama") {
     refreshOllamaModels({ silent: true });
   }
@@ -332,6 +474,25 @@ fields.ollamaModel.addEventListener("change", () => {
 });
 
 refreshOllamaModelsButton.addEventListener("click", refreshOllamaModels);
+refreshSpeechModelButton.addEventListener("click", () => refreshSpeechModelStatus());
+downloadSpeechModelButton.addEventListener("click", downloadSpeechModel);
+deleteSpeechModelButton.addEventListener("click", deleteSpeechModel);
+speechModelProfile.addEventListener("change", () => {
+  speechModelStatus = null;
+  refreshSpeechModelStatus();
+});
+fields.fastVoiceModel.addEventListener("change", () => {
+  if (speechModelProfile.value === "fast") {
+    speechModelStatus = null;
+    refreshSpeechModelStatus({ silent: true });
+  }
+});
+fields.accurateVoiceModel.addEventListener("change", () => {
+  if (speechModelProfile.value === "accurate") {
+    speechModelStatus = null;
+    refreshSpeechModelStatus({ silent: true });
+  }
+});
 
 resetAdvancedButton.addEventListener("click", () => {
   writeFormConfig({ ...currentConfig, ...DEFAULT_ADVANCED });
@@ -346,6 +507,12 @@ form.addEventListener("submit", (event) => {
 window.openflow.onConfigUpdated((nextConfig) => {
   if (!isSaving && !isDirty()) {
     writeFormConfig(nextConfig, true);
+  }
+});
+
+window.openflow.onSpeechModelUpdate((event) => {
+  if (!event?.model || event.model === selectedSpeechModel()) {
+    renderSpeechModelStatus(event);
   }
 });
 

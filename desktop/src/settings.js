@@ -456,7 +456,9 @@ async function refreshAppStatus() {
       setState(backendState, status.workerStatus.message || "Running", "ok");
       setState(
         modelState,
-        status.worker?.model === "ready" ? "Ready" : "Loading",
+        status.worker?.model === "ready"
+          ? status.activeVoiceModel || "Active model"
+          : `${status.activeVoiceModel || "Model"} loading`,
         status.worker?.model === "ready" ? "ok" : "",
       );
     } else {
@@ -673,6 +675,7 @@ window.openflow.onHotkeyCaptureCancelled(() => {
 window.openflow.onLlmStatusUpdated((status) => {
   setLlmStatus(status);
 });
+window.openflow.onAppStatusUpdated(refreshAppStatus);
 window.openflow.onRemeasureSettingsWindow(requestWindowFit);
 
 loadSettings();

@@ -26,6 +26,16 @@ const {
   secureWebPreferences,
 } = require("./window_security");
 
+const VOICE_MODELS = Object.freeze([
+  "tiny",
+  "base",
+  "small",
+  "medium",
+  "large-v3",
+  "large-v3-turbo",
+  "distil-large-v3",
+]);
+
 const DEFAULT_CONFIG = {
   hotkey: "CommandOrControl+Alt+Space",
   language: "en",
@@ -34,6 +44,8 @@ const DEFAULT_CONFIG = {
   selectedInputDeviceId: "",
   autoPaste: true,
   appendSpace: true,
+  fastVoiceModel: "large-v3-turbo",
+  accurateVoiceModel: "large-v3-turbo",
   llmEnabled: false,
   llmProvider: "llamacpp",
   llmServerUrl: DEFAULT_LLAMACPP_URL,
@@ -53,6 +65,7 @@ let settingsWindow;
 let advancedSettingsWindow;
 let tray;
 let localWorkerTransport;
+let localWorkerModelName = null;
 let hotkeyWatcherProcess;
 let isRecording = false;
 let isStartingDictation = false;
@@ -62,6 +75,7 @@ let isQuitting = false;
 let isCapturingHotkey = false;
 let llmLoadState = { key: "", state: "off", provider: "", baseUrl: "", model: "" };
 let llmLoadRequestId = 0;
+let modelManagementOperation = null;
 
 const rootDir = path.resolve(__dirname, "..", "..");
 const backendDir = path.join(rootDir, "backend");
@@ -133,6 +147,7 @@ function sanitizeConfig(nextConfig) {
     ? source.llmProvider
     : DEFAULT_CONFIG.llmProvider;
   const allowRemoteLlm = booleanSetting(source.allowRemoteLlm, DEFAULT_CONFIG.allowRemoteLlm);
+  const voiceModel = (value, fallback) => VOICE_MODELS.includes(value) ? value : fallback;
 
   return {
     ...DEFAULT_CONFIG,
@@ -144,6 +159,8 @@ function sanitizeConfig(nextConfig) {
     selectedInputDeviceId: String(source.selectedInputDeviceId || ""),
     autoPaste: booleanSetting(source.autoPaste, DEFAULT_CONFIG.autoPaste),
     appendSpace: booleanSetting(source.appendSpace, DEFAULT_CONFIG.appendSpace),
+    fastVoiceModel: voiceModel(source.fastVoiceModel, DEFAULT_CONFIG.fastVoiceModel),
+    accurateVoiceModel: voiceModel(source.accurateVoiceModel, DEFAULT_CONFIG.accurateVoiceModel),
     llmEnabled: booleanSetting(source.llmEnabled, DEFAULT_CONFIG.llmEnabled),
     llmProvider,
     llmServerUrl: sanitizeHttpServiceUrl(source.llmServerUrl, DEFAULT_LLM_URL, allowRemoteLlm),
@@ -845,7 +862,15 @@ function recorderStartConfig() {
   };
 }
 
-function workerLaunchOptions() {
+function voiceModelForMode(mode = config.mode) {
+  return mode === "accurate" ? config.accurateVoiceModel : config.fastVoiceModel;
+}
+
+function requestedVoiceModel(value) {
+  return VOICE_MODELS.includes(value) ? value : voiceModelForMode();
+}
+
+function workerLaunchOptions(modelName = voiceModelForMode()) {
   const configuredPython = String(process.env.OPENFLOW_PYTHON || "").trim();
   const venvPython = path.join(backendDir, ".venv", "Scripts", "python.exe");
   const command = configuredPython || (fs.existsSync(venvPython) ? venvPython : "python");
@@ -860,8 +885,99 @@ function workerLaunchOptions() {
       PATH: process.env.PATH || "",
       PYTHONUNBUFFERED: "1",
       PYTHONUTF8: "1",
+      MODEL_NAME: modelName,
     },
   };
+}
+
+function publishSpeechModelUpdate(payload) {
+  if (advancedSettingsWindow && !advancedSettingsWindow.isDestroyed()) {
+    advancedSettingsWindow.webContents.send("speech-model:update", payload);
+  }
+}
+
+function notifyAppStatusUpdated() {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.webContents.send("app-status:updated");
+  }
+}
+
+function runSpeechModelManager(action, options = {}) {
+  const exclusive = Boolean(options.exclusive);
+  if (exclusive && modelManagementOperation) {
+    return Promise.reject(new Error("A speech model operation is already in progress."));
+  }
+
+  const modelName = VOICE_MODELS.includes(options.modelName) ? options.modelName : voiceModelForMode();
+  const launch = workerLaunchOptions(modelName);
+  const args = [path.join(backendDir, "scripts", "manage_model.py"), action, "--json"];
+  if (action !== "list" && action !== "cleanup") args.push("--model", modelName);
+  if (options.includeRemote) args.push("--include-remote");
+  const operation = { action };
+  if (exclusive) modelManagementOperation = operation;
+
+  return new Promise((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    let lastEvent = null;
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      if (modelManagementOperation === operation) modelManagementOperation = null;
+      callback(value);
+    };
+    let child;
+    try {
+      child = spawn(launch.command, args, {
+        cwd: launch.cwd,
+        env: launch.env,
+        shell: false,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      finish(reject, error);
+      return;
+    }
+    const handleLine = (line) => {
+      if (!line.trim()) return;
+      try {
+        const event = JSON.parse(line);
+        if (!event || typeof event !== "object") return;
+        lastEvent = event;
+        publishSpeechModelUpdate(event);
+      } catch {
+        stderr = `${stderr}${line}\n`.slice(-8192);
+      }
+    };
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      const lines = stdout.split(/\r?\n/);
+      stdout = lines.pop() || "";
+      for (const line of lines) handleLine(line);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr = `${stderr}${chunk.toString("utf8")}`.slice(-8192);
+    });
+    child.once("error", (error) => finish(reject, error));
+    child.once("close", (code) => {
+      handleLine(stdout);
+      if (code === 0 && lastEvent) {
+        finish(resolve, lastEvent);
+        return;
+      }
+      const message = lastEvent?.message || stderr.trim() || `Speech model ${action} failed.`;
+      finish(reject, new Error(message));
+    });
+  });
+}
+
+async function stopWorkerForSpeechModelOperation() {
+  if (!localWorkerTransport || localWorkerTransport.getState().worker === "stopped") {
+    return;
+  }
+  await localWorkerTransport.shutdown();
 }
 
 function forwardWorkerEvent(event) {
@@ -877,20 +993,24 @@ function forwardWorkerEvent(event) {
   }
 }
 
-function createLocalWorkerTransport() {
+function createLocalWorkerTransport(modelName = voiceModelForMode()) {
   if (localWorkerTransport) {
     return localWorkerTransport;
   }
-  localWorkerTransport = createDictationTransport(workerLaunchOptions());
+  localWorkerModelName = modelName;
+  localWorkerTransport = createDictationTransport(workerLaunchOptions(modelName));
   localWorkerTransport.on("model", (event) => {
     if (recorderWindow && !recorderWindow.isDestroyed()) {
       recorderWindow.webContents.send("dictation:model-state", event);
     }
     if (event.state === "loading") {
       showStatus("transcribing", "Preparing speech model...", true);
+    } else if (event.state === "ready") {
+      showStatus("ready", `Ready: ${config.hotkey}`);
     } else if (event.state === "unavailable") {
       showStatus("error", "Speech model is unavailable", true);
     }
+    notifyAppStatusUpdated();
   });
   localWorkerTransport.on("event", forwardWorkerEvent);
   localWorkerTransport.on("pressure", () => {
@@ -908,8 +1028,16 @@ function createLocalWorkerTransport() {
   return localWorkerTransport;
 }
 
-async function ensureLocalWorkerReady(signal) {
-  const transport = createLocalWorkerTransport();
+async function ensureLocalWorkerReady(signal, modelName = voiceModelForMode()) {
+  if (modelManagementOperation) {
+    throw new Error("Wait for the speech model operation to finish.");
+  }
+  if (localWorkerTransport && localWorkerModelName !== modelName) {
+    await localWorkerTransport.shutdown();
+    localWorkerTransport = null;
+    localWorkerModelName = null;
+  }
+  const transport = createLocalWorkerTransport(modelName);
   if (transport.getState().worker === "stopped") {
     await transport.startWorker();
   }
@@ -1268,6 +1396,16 @@ trustedHandle("config:save", async (_event, nextConfig) => {
   preloadConfiguredLlmInBackground(config);
   notifyConfigUpdated();
   setTrayMenu();
+  const selectedVoiceModelChanged = (
+    next.fastVoiceModel !== previousConfig.fastVoiceModel
+    || next.accurateVoiceModel !== previousConfig.accurateVoiceModel
+    || next.mode !== previousConfig.mode
+  );
+  if (selectedVoiceModelChanged && !isRecording && !isStartingDictation) {
+    ensureLocalWorkerReady(undefined, voiceModelForMode()).catch((error) => {
+      showStatus("error", error?.message || "Could not start selected speech model", true);
+    });
+  }
   showStatus(
     hotkeyRegistered ? "ready" : "error",
     hotkeyRegistered
@@ -1300,6 +1438,27 @@ trustedHandle("llm:preload", async (_event, nextConfig) => {
   return preloadConfiguredLlm(preloadConfig, { force: true });
 });
 
+trustedHandle("speech-model:status", async (_event, modelName) => (
+  runSpeechModelManager("status", { includeRemote: true, modelName: requestedVoiceModel(modelName) })
+));
+
+trustedHandle("speech-model:download", async (_event, modelName) => {
+  const selectedModel = requestedVoiceModel(modelName);
+  await stopWorkerForSpeechModelOperation();
+  const result = await runSpeechModelManager("download", { exclusive: true, modelName: selectedModel });
+  try {
+    await ensureLocalWorkerReady(undefined, selectedModel);
+    return { ...result, message: "Model download complete and ready" };
+  } catch (error) {
+    return { ...result, message: `Model downloaded, but could not start: ${error?.message || "unknown error"}` };
+  }
+});
+
+trustedHandle("speech-model:delete", async (_event, modelName) => {
+  await stopWorkerForSpeechModelOperation();
+  return runSpeechModelManager("delete", { exclusive: true, modelName: requestedVoiceModel(modelName) });
+});
+
 trustedHandle("advanced-settings:open", () => {
   openAdvancedSettingsWindow();
   return { ok: true };
@@ -1312,6 +1471,7 @@ trustedHandle("app-status:get", async () => {
     isRecording,
     isStartingDictation,
     worker,
+    activeVoiceModel: localWorkerModelName,
     workerStatus: status,
     llm: llmStatus(config),
     gpuMemory: await gpuMemoryStatus(),
@@ -1340,6 +1500,9 @@ app.whenReady().then(async () => {
   setTrayMenu();
 
   const hotkeyRegistered = await applyShortcutRegistration();
+  await runSpeechModelManager("cleanup").catch((error) => {
+    console.warn("Could not clean incomplete speech model downloads:", error?.message || error);
+  });
   ensureLocalWorkerReady().catch((error) => {
     showStatus("error", error?.message || "Could not start speech worker", true);
   });
