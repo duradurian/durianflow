@@ -17,7 +17,7 @@ class LocalWorkerTransport extends EventEmitter {
     this.supervisor.on("event", (event) => {
       if (event.type === "model_state") this.emit("model", event);
       if (event.sessionId && (!this.session || event.sessionId !== this.session.id || event.generation !== this.generation)) return;
-by stale local state.      if (event.type === "stopped" || event.ty12 q``      if (event.type === "accepted") {
+      if (event.type === "accepted") {
         this.creditBytes = Math.max(0, Number(event.creditBytes) || 0);
         if (this.session) this.session.state = "active";
       }
