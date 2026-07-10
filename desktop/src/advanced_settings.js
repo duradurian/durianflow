@@ -1,5 +1,5 @@
 const DEFAULT_ADVANCED = {
-  computeDevice: "cuda",
+  computeDevice: "cpu",
   fastVoiceModel: "large-v3-turbo",
   accurateVoiceModel: "large-v3-turbo",
   llmEnabled: false,
@@ -52,11 +52,12 @@ const ADVANCED_CONFIG_KEYS = Object.keys(fields);
 
 let currentConfig = null;
 let savedSnapshot = "";
-let llmPreloadGeneration = 0;
 let isSaving = false;
 let formRevision = 0;
 let speechModelStatus = null;
 let speechModelOperation = false;
+let speechModelStatusGeneration = 0;
+let ollamaModelsGeneration = 0;
 
 function setMessage(message, type = "") {
   formMessage.textContent = message;
@@ -101,6 +102,9 @@ function setSpeechModelControlsDisabled(disabled) {
   downloadSpeechModelButton.disabled = disabled || installed || hasUnsavedChanges;
   deleteSpeechModelButton.disabled = disabled || !canDelete || hasUnsavedChanges;
   refreshSpeechModelButton.disabled = disabled;
+  speechModelProfile.disabled = disabled;
+  fields.fastVoiceModel.disabled = disabled;
+  fields.accurateVoiceModel.disabled = disabled;
 }
 
 function selectedSpeechModel() {
@@ -149,11 +153,18 @@ function renderSpeechModelStatus(status) {
 }
 
 async function refreshSpeechModelStatus(options = {}) {
+  const generation = ++speechModelStatusGeneration;
+  const model = selectedSpeechModel();
   if (!options.silent) speechModelSummary.textContent = "Checking model status…";
   try {
-    renderSpeechModelStatus(await window.openflow.getSpeechModelStatus(selectedSpeechModel()));
+    const status = await window.openflow.getSpeechModelStatus(model);
+    if (generation === speechModelStatusGeneration && model === selectedSpeechModel()) {
+      renderSpeechModelStatus(status);
+    }
   } catch (error) {
-    renderSpeechModelStatus({ type: "error", message: error.message || "Could not inspect speech model" });
+    if (generation === speechModelStatusGeneration && model === selectedSpeechModel()) {
+      renderSpeechModelStatus({ type: "error", message: error.message || "Could not inspect speech model" });
+    }
   }
 }
 
@@ -296,7 +307,6 @@ async function savePendingChanges() {
       response.hotkeyRegistered ? "Saved" : "Settings saved, but hotkey is unavailable",
       response.hotkeyRegistered ? "ok" : "error",
     );
-    preloadSelectedOllamaModel();
   } catch (error) {
     setMessage(error.message || "Could not save changes", "error");
   } finally {
@@ -370,27 +380,35 @@ function writeFormConfig(config, markSaved = false) {
 async function loadSettings() {
   setFormDisabled(true);
   setMessage("Loading");
+  try {
+    const response = await window.openflow.getConfig();
+    versionMessage.textContent = `Version ${response.appVersion || "0.1.0"}`;
+    writeFormConfig(response.config, true);
 
-  const response = await window.openflow.getConfig();
-  versionMessage.textContent = `Version ${response.appVersion || "0.1.0"}`;
-  writeFormConfig(response.config, true);
-
-  setFormDisabled(false);
-  updateDirtyState();
-  refreshSpeechModelStatus({ silent: true });
-  if (fields.llmProvider.value === "ollama") {
-    refreshOllamaModels({ silent: true });
+    setFormDisabled(false);
+    updateDirtyState();
+    if (response.configWarning) setMessage(response.configWarning, "error");
+    refreshSpeechModelStatus({ silent: true });
+    if (fields.llmProvider.value === "ollama") {
+      refreshOllamaModels({ silent: true });
+    }
+  } catch (error) {
+    setMessage(error.message || "Could not load settings", "error");
+    setFormDisabled(false);
   }
 }
 
 async function refreshOllamaModels(options = {}) {
+  const generation = ++ollamaModelsGeneration;
+  const baseUrl = fields.ollamaServerUrl.value.trim();
   refreshOllamaModelsButton.disabled = true;
   if (!options.silent) {
     setMessage("Scanning Ollama models");
   }
 
   try {
-    const result = await window.openflow.listOllamaModels(fields.ollamaServerUrl.value.trim());
+    const result = await window.openflow.listOllamaModels(baseUrl);
+    if (generation !== ollamaModelsGeneration || baseUrl !== fields.ollamaServerUrl.value.trim()) return;
     const previousModel = fields.ollamaModel.value;
     setOllamaModelOptions(result.models || [], previousModel);
     if (fields.ollamaModel.value !== previousModel) {
@@ -400,39 +418,11 @@ async function refreshOllamaModels(options = {}) {
       setMessage(result.ok ? `Found ${result.models.length} Ollama model(s)` : result.message || "No Ollama models found", result.ok ? "ok" : "error");
     }
   } catch (error) {
-    if (!options.silent) {
+    if (generation === ollamaModelsGeneration && !options.silent) {
       setMessage(error.message || "No Ollama models found", "error");
     }
   } finally {
-    refreshOllamaModelsButton.disabled = false;
-  }
-}
-
-async function preloadSelectedOllamaModel() {
-  if (
-    !fields.llmEnabled.checked
-    || fields.llmProvider.value !== "ollama"
-    || !fields.ollamaModel.value.trim()
-  ) {
-    return;
-  }
-
-  const generation = ++llmPreloadGeneration;
-  setMessage("Starting LLM");
-
-  try {
-    const result = await window.openflow.preloadLlm(readAdvancedConfig());
-    if (generation !== llmPreloadGeneration) {
-      return;
-    }
-    setMessage(
-      result.state === "ready" ? "LLM ready" : "LLM starting",
-      result.state === "ready" ? "ok" : "",
-    );
-  } catch (error) {
-    if (generation === llmPreloadGeneration) {
-      setMessage(error.message || "LLM starting", "error");
-    }
+    if (generation === ollamaModelsGeneration) refreshOllamaModelsButton.disabled = false;
   }
 }
 

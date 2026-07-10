@@ -47,6 +47,7 @@ let autoSaveTimer = null;
 let isSaving = false;
 let saveQueuedDuringRequest = false;
 let formRevision = 0;
+let micTestGeneration = 0;
 
 function requestWindowFit() {
   clearTimeout(resizeTimer);
@@ -63,7 +64,7 @@ function requestWindowFit() {
         document.documentElement.scrollHeight,
         document.body.scrollHeight,
       ));
-      window.openflow.fitSettingsWindow({ width, height });
+      window.openflow.fitSettingsWindow({ width, height }).catch(() => {});
     });
   }, 40);
 }
@@ -83,7 +84,7 @@ function setLlmStatus(llmStatus) {
   setState(
     llmState,
     status.message || "Off",
-    status.state === "ready" ? "ok" : "",
+    status.state === "ready" ? "ok" : status.state === "unavailable" ? "error" : "",
   );
 }
 
@@ -110,7 +111,7 @@ function setMemoryGauge(card, valueElement, meterElement, memory, unavailableTex
   card.classList.toggle("error", percent >= 90);
 }
 
-function setMemoryStatus(memory, computeDevice = "cuda") {
+function setMemoryStatus(memory, computeDevice = "cpu") {
   const isCpu = computeDevice === "cpu";
   memoryLabel.textContent = isCpu ? "App RAM" : "GPU Memory";
   setMemoryGauge(
@@ -369,7 +370,6 @@ async function savePendingChanges() {
     } else {
       currentConfig = response.config;
       savedSnapshot = snapshotConfig(response.config);
-      setRecordedHotkey(response.config.hotkey || "");
     }
 
     setMessage(
@@ -457,18 +457,28 @@ async function refreshAppStatus() {
     const status = await window.openflow.getAppStatus();
     setState(
       recordingState,
-      status.isRecording ? "Listening" : status.isStartingDictation ? "Preparing" : "Idle",
+      status.isRecording
+        ? "Listening"
+        : status.isStartingDictation
+          ? "Preparing"
+          : status.isFinalizingDictation
+            ? "Transcribing"
+            : "Idle",
       status.isRecording ? "ok" : "",
     );
 
-    if (status.workerStatus.ok) {
+    if (status.worker?.worker === "ready") {
       setState(backendState, status.workerStatus.message || "Running", "ok");
+      const modelReady = status.worker.model === "ready";
+      const modelUnavailable = status.worker.model === "unavailable";
       setState(
         modelState,
-        status.worker?.model === "ready"
+        modelReady
           ? status.activeVoiceModel || "Active model"
-          : `${status.activeVoiceModel || "Model"} loading`,
-        status.worker?.model === "ready" ? "ok" : "",
+          : modelUnavailable
+            ? "Unavailable"
+            : `${status.activeVoiceModel || "Model"} loading`,
+        modelReady ? "ok" : modelUnavailable ? "error" : "",
       );
     } else {
       setState(backendState, status.workerStatus.message || "Unavailable", "error");
@@ -481,23 +491,27 @@ async function refreshAppStatus() {
     setState(backendState, "Unknown", "error");
     setState(modelState, "Unknown", "error");
     setState(llmState, "Unknown", "error");
-    setMemoryStatus(null, "cuda");
+    setMemoryStatus(null, "cpu");
   }
 }
 
 async function loadSettings() {
   setFormDisabled(true);
   setMessage("Loading");
-
-  const response = await window.openflow.getConfig();
-  versionMessage.textContent = `Version ${response.appVersion || "0.1.0"}`;
-  writeFormConfig(response.config, true);
-  await loadDevices(response.config.selectedInputDeviceId);
-  await refreshAppStatus();
-
-  setFormDisabled(false);
-  updateDirtyState();
-  requestWindowFit();
+  try {
+    const response = await window.openflow.getConfig();
+    versionMessage.textContent = `Version ${response.appVersion || "0.1.0"}`;
+    writeFormConfig(response.config, true);
+    await loadDevices(response.config.selectedInputDeviceId);
+    await refreshAppStatus();
+    setFormDisabled(false);
+    updateDirtyState();
+    if (response.configWarning) setMessage(response.configWarning, "error");
+    requestWindowFit();
+  } catch (error) {
+    setMessage(error.message || "Could not load settings", "error");
+    setFormDisabled(false);
+  }
 }
 
 function setHotkeyCaptureControlsDisabled(disabled) {
@@ -518,7 +532,6 @@ async function beginHotkeyRecording() {
   if (isRecordingHotkey) {
     return;
   }
-  await window.openflow.beginHotkeyCapture();
   hotkeyBeforeCapture = recordedHotkey;
   isRecordingHotkey = true;
   setHotkeyCaptureControlsDisabled(true);
@@ -526,6 +539,15 @@ async function beginHotkeyRecording() {
   hotkeyValue.textContent = "Press a shortcut";
   setMessage("Recording hotkey. Press Esc to cancel.");
   hotkeyButton.focus();
+  try {
+    await window.openflow.beginHotkeyCapture();
+  } catch (error) {
+    isRecordingHotkey = false;
+    setRecordedHotkey(hotkeyBeforeCapture);
+    setHotkeyCaptureControlsDisabled(false);
+    hotkeyButton.classList.remove("recording");
+    throw error;
+  }
 }
 
 async function endHotkeyRecording() {
@@ -552,6 +574,9 @@ async function handleCapturedHotkey(accelerator) {
 }
 
 async function testMicrophone() {
+  const generation = ++micTestGeneration;
+  let stream = null;
+  let audioContext = null;
   if (micTestCleanup) {
     micTestCleanup();
   }
@@ -567,8 +592,18 @@ async function testMicrophone() {
       audio.deviceId = { exact: fields.selectedInputDeviceId.value };
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio, video: false });
-    const audioContext = new AudioContext();
+    stream = await navigator.mediaDevices.getUserMedia({ audio, video: false });
+    if (generation !== micTestGeneration) {
+      for (const track of stream.getTracks()) track.stop();
+      return;
+    }
+    audioContext = new AudioContext();
+    await audioContext.resume();
+    if (generation !== micTestGeneration) {
+      for (const track of stream.getTracks()) track.stop();
+      audioContext.close();
+      return;
+    }
     const analyser = audioContext.createAnalyser();
     analyser.fftSize = 256;
     const source = audioContext.createMediaStreamSource(stream);
@@ -576,7 +611,8 @@ async function testMicrophone() {
     source.connect(analyser);
 
     let stopped = false;
-    micTestCleanup = () => {
+    const cleanup = () => {
+      if (stopped) return;
       stopped = true;
       source.disconnect();
       for (const track of stream.getTracks()) {
@@ -584,8 +620,9 @@ async function testMicrophone() {
       }
       audioContext.close();
       micMeter.style.width = "0%";
-      micTestCleanup = null;
+      if (micTestCleanup === cleanup) micTestCleanup = null;
     };
+    micTestCleanup = cleanup;
 
     const draw = () => {
       if (stopped) {
@@ -603,13 +640,15 @@ async function testMicrophone() {
 
     setState(micState, "Mic active", "ok");
     setTimeout(() => {
-      if (micTestCleanup) {
-        micTestCleanup();
+      if (micTestCleanup === cleanup) {
+        cleanup();
         setState(micState, "Ready", "ok");
       }
     }, 5000);
   } catch {
-    setState(micState, "Permission needed", "error");
+    if (stream) for (const track of stream.getTracks()) track.stop();
+    if (audioContext) audioContext.close().catch(() => {});
+    if (generation === micTestGeneration) setState(micState, "Permission needed", "error");
   }
 }
 

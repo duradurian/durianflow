@@ -9,7 +9,8 @@ function parseUrl(value) {
 }
 
 function isLocalHost(hostname) {
-  return LOCAL_HOSTS.has(String(hostname || "").toLowerCase());
+  const normalized = String(hostname || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return LOCAL_HOSTS.has(normalized);
 }
 
 function sanitizeUrl(value, fallback, options) {

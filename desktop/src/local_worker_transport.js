@@ -15,21 +15,31 @@ class LocalWorkerTransport extends EventEmitter {
 
   _bindSupervisor() {
     this.supervisor.on("event", (event) => {
-      if (event.type === "accepted") this.creditBytes = Math.max(0, Number(event.creditBytes) || 0);
       if (event.type === "model_state") this.emit("model", event);
       if (event.sessionId && (!this.session || event.sessionId !== this.session.id || event.generation !== this.generation)) return;
-      this.emit("event", event);
-      this.emit(event.type, event);
-      // The terminal event still belongs to the just-finished session, but a
-      // subsequent start must not be blocked by stale local state.
-      if (event.type === "stopped" || event.type === "canceled" || (event.type === "status" && event.status === "stopped")) {
+by stale local state.      if (event.type === "stopped" || event.ty12 q``      if (event.type === "accepted") {
+        this.creditBytes = Math.max(0, Number(event.creditBytes) || 0);
+        if (this.session) this.session.state = "active";
+      }
+      // Clear terminal state before notifying listeners so a terminal handler
+      // can synchronously begin the next session without seeing stale state.
+      if (event.type === "stopped" || event.type === "canceled") {
         this.session = null;
         this.creditBytes = 0;
       }
+      this.emit("event", event);
+      // Protocol error records are forwarded through "event". Emitting them as
+      // EventEmitter's reserved "error" channel would misclassify a recoverable
+      // session error as a supervisor failure and notify the recorder twice.
+      if (event.type !== "error") this.emit(event.type, event);
     });
     this.supervisor.on("backpressure", (state) => this.emit("pressure", { ...state, creditBytes: this.creditBytes }));
     this.supervisor.on("fatal", (error) => this.emit("error", error));
-    this.supervisor.on("exit", (detail) => { this.session = null; this.emit("exit", detail); });
+    this.supervisor.on("exit", (detail) => {
+      this.session = null;
+      this.creditBytes = 0;
+      this.emit("exit", detail);
+    });
   }
 
   startWorker() { return this.supervisor.start(); }
@@ -41,7 +51,12 @@ class LocalWorkerTransport extends EventEmitter {
     this.generation += 1;
     this.session = { id: sessionId, state: "starting" };
     this.creditBytes = 0;
-    this.supervisor.send({ type: "start", sessionId, generation: this.generation, sequence: 0, sampleRate, channels, format, language, mode });
+    try {
+      this.supervisor.send({ type: "start", sessionId, generation: this.generation, sequence: 0, sampleRate, channels, format, language, mode });
+    } catch (error) {
+      this.session = null;
+      throw error;
+    }
     return { sessionId, generation: this.generation };
   }
 
@@ -51,7 +66,7 @@ class LocalWorkerTransport extends EventEmitter {
     if (bytes.length === 0 || bytes.length > this.supervisor.options.maxAudioBytes || bytes.length % 2) {
       throw new ProtocolError("Invalid PCM audio frame", "INVALID_AUDIO_FRAME");
     }
-    if (this.creditBytes && bytes.length > this.creditBytes) {
+    if (bytes.length > this.creditBytes) {
       this.emit("pressure", { creditBytes: this.creditBytes });
       return false;
     }
@@ -64,11 +79,27 @@ class LocalWorkerTransport extends EventEmitter {
   cancel() { return this._finish("cancel", "canceling"); }
   _finish(type, state) {
     if (!this.session) return false;
+    if (this.session.state === state) return true;
+    if (this.session.state === "canceling" && type === "stop") return true;
+    const previousState = this.session.state;
+    const previousSequence = this.session.sequence || 0;
+    const sequence = previousSequence + 1;
     this.session.state = state;
-    this.supervisor.send({ type, sessionId: this.session.id, generation: this.generation, sequence: (this.session.sequence || 0) + 1 });
+    this.session.sequence = sequence;
+    try {
+      this.supervisor.send({ type, sessionId: this.session.id, generation: this.generation, sequence });
+    } catch (error) {
+      this.session.state = previousState;
+      this.session.sequence = previousSequence;
+      throw error;
+    }
     return true;
   }
-  shutdown() { this.session = null; return this.supervisor.stop(); }
+  shutdown(options) {
+    this.session = null;
+    this.creditBytes = 0;
+    return this.supervisor.stop(options);
+  }
 }
 
 module.exports = { LocalWorkerTransport };

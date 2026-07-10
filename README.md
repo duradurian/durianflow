@@ -1,11 +1,11 @@
 # Durianflow
 
-Note: The app was built for my side quests where he realized I didn't want to use the crappy stock dictation in Windows nor did he want to pay for one of those expensive services so he made his own. As a result, I ended up creating this in 2 hours, and have been working on hardening it so that it is a secure dictation software. There is still a long way to go to harden the app to make it production ready, but it's getting there.
+Note: I built this as a side project because Windows' stock dictation did not fit my workflow and I did not want a paid transcription service. The first version took about two hours; the repository has since focused on making the local dictation path more reliable and secure.
 
 
 Durianflow is a local Windows dictation app that turns speech into text in any focused textbox. It combines an Electron tray client with a supervised local Python transcription worker powered by `faster-whisper` and CTranslate2.
 
-Durianflow does not use the hosted OpenAI API. Speech recognition runs on your own machine or server. The app should be compatible with most openai compatible endpoints; I personally haven't tested it beyond trying Ollama and Unsloth but it seems to work pretty well. A cool idea would be to create a fine tuned model for each diction option that meets your needs. I personally have some prototypes of fine tuned qwen3.5:9b for the format diction option and it seems to show less hallucination when thinking is turned off relative to the base model, though, it is to be benchmarked.
+Durianflow does not use the hosted OpenAI API for speech recognition. Transcription runs in the supervised Python worker on your machine. Optional text refinement supports local llama.cpp and Ollama services, or an explicitly enabled compatible remote endpoint. I personally haven't tested refinement beyond Ollama and Unsloth. A custom model for each dictation mode may improve formatting quality, but that still needs benchmarking.
 
 ## Features
 
@@ -36,7 +36,7 @@ protocol.md           Local worker framing and PCM audio contract
 
 ## Quick Start
 
-The easiest Windows flow is to start the Electron app. It will try to start the backend automatically.
+Complete the one-time [Worker Setup](#worker-setup) first. The Electron app starts the configured Python worker automatically, but it does not create the virtual environment or install Python dependencies.
 
 ```powershell
 cd desktop
@@ -59,7 +59,7 @@ cd backend
 python scripts/install_model.py large-v3-turbo
 ```
 
-If `ALLOW_MODEL_DOWNLOAD=false` is set and the model is missing, `/health` reports the setup error instead of downloading.
+If `ALLOW_MODEL_DOWNLOAD=false` is set and the model is missing, the worker emits an unavailable model state and the desktop status view reports the setup error instead of downloading.
 
 If PowerShell blocks `npm.ps1`, use the command shim:
 
@@ -78,17 +78,20 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 python scripts/install_model.py large-v3-turbo
-python scripts/run_worker.py
 ```
 
-For CPU-only machines, edit `backend/.env`:
+The Electron app starts the worker itself. To exercise the worker protocol directly during backend development, run `python scripts/run_worker.py` and stop it before launching Electron.
+
+The desktop app defaults to **CPU** under **Advanced Settings > Speech Model**. The desktop launcher owns the model, device, and compute-type settings for its worker.
+
+When running `scripts/run_worker.py` or the backend utilities directly, configure CPU mode in `backend/.env`:
 
 ```env
 DEVICE=cpu
 COMPUTE_TYPE=int8
 ```
 
-For native Windows GPU inference, install the CUDA/cuDNN dependencies described in [docs/nvidia-gpu.md](docs/nvidia-gpu.md), then keep:
+For native Windows GPU inference, install the CUDA/cuDNN dependencies described in [docs/nvidia-gpu.md](docs/nvidia-gpu.md), then choose **NVIDIA GPU (CUDA)** in the desktop's Advanced Settings. For a directly launched worker, use:
 
 ```env
 DEVICE=cuda
@@ -131,7 +134,7 @@ python scripts/benchmark_models.py
 
 ## Configuration
 
-Backend settings are loaded from `backend/.env`. Important defaults:
+Backend settings are loaded from `backend/.env`. When Electron launches the worker, the selected desktop speech profile overrides `MODEL_NAME`, `DEVICE`, `COMPUTE_TYPE`, and CUDA fallback behavior. Important backend defaults are:
 
 ```env
 MODEL_NAME=large-v3-turbo
@@ -146,8 +149,6 @@ CHANNELS=1
 PARTIAL_INTERVAL_MS=1000
 ROLLING_WINDOW_SECONDS=6
 MAX_CONCURRENT_TRANSCRIPTIONS=1
-REQUIRE_API_TOKEN=false
-API_TOKEN=
 ```
 
 For fully offline startup, preinstall a model with `scripts/install_model.py` and set `ALLOW_MODEL_DOWNLOAD=false`.
@@ -173,11 +174,12 @@ cd backend
 pytest
 ```
 
-Run the desktop JavaScript syntax check:
+Run the desktop JavaScript checks:
 
 ```powershell
 cd desktop
 npm run check
+npm test
 ```
 
 ## Documentation

@@ -1,8 +1,21 @@
 [project]
-name = "openflow-backend"
+name = "durianflow-backend"
 version = "0.1.0"
-description = "Self-hosted faster-whisper backend for Openflow dictation."
+description = "Self-hosted faster-whisper backend for Durianflow dictation."
 requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.13.3,<3",
+    "pydantic-settings>=2.14.2,<3",
+    "numpy>=2.4.4,<3",
+    "scipy>=1.17.1,<2",
+    "soundfile>=0.13.1,<1",
+    "faster-whisper>=1.2.1,<2",
+    "idna>=3.15,<4",
+    "python-dotenv>=1.2.2,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=9.0.3,<10"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

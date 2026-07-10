@@ -1,5 +1,9 @@
 from pathlib import Path
 
+import pytest
+
+from app.config import Settings
+
 from scripts import manage_model
 
 
@@ -7,6 +11,8 @@ def write_model(path: Path) -> None:
     path.mkdir(parents=True)
     (path / "model.bin").write_bytes(b"model")
     (path / "config.json").write_text("{}", encoding="utf-8")
+    (path / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (path / "vocabulary.json").write_text("{}", encoding="utf-8")
 
 
 def test_cleanup_removes_only_incomplete_managed_downloads(monkeypatch, tmp_path: Path) -> None:
@@ -25,6 +31,8 @@ def test_cleanup_removes_only_incomplete_managed_downloads(monkeypatch, tmp_path
 
     complete = tmp_path / "base"
     write_model(complete)
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
     locks = tmp_path / ".locks"
     locks.mkdir()
 
@@ -34,5 +42,37 @@ def test_cleanup_removes_only_incomplete_managed_downloads(monkeypatch, tmp_path
     assert not incomplete_cache.exists()
     assert not temporary.exists()
     assert complete.exists()
+    assert unrelated.exists()
     assert locks.exists()
     assert len(result["removed"]) == 3
+
+
+def test_delete_refuses_linked_model_slot(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "models"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+    slot = root / "small"
+    try:
+        slot.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"Directory symlinks are unavailable: {exc}")
+
+    monkeypatch.setattr(
+        manage_model,
+        "profile_settings",
+        lambda model_name: Settings(
+            _env_file=None,
+            MODEL_NAME=model_name,
+            MODELS_DIR=str(root),
+            MODEL_PATH=None,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="linked model path"):
+        manage_model.delete("small", json_output=True)
+
+    assert marker.read_text(encoding="utf-8") == "keep"
+    assert slot.is_symlink()

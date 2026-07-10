@@ -8,16 +8,21 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from app.config import get_settings
-from app.config import Settings
-from app.schemas import AVAILABLE_MODELS
-from app.transcriber import WhisperTranscriber
+from app.config import Settings, get_settings  # noqa: E402
+from app.transcriber import WhisperTranscriber  # noqa: E402
+
+
+def positive_seconds(value: str) -> int:
+    seconds = int(value)
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError("seconds must be a positive integer")
+    return seconds
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark configured faster-whisper models locally.")
     parser.add_argument("--models", nargs="*")
-    parser.add_argument("--seconds", type=int, default=10)
+    parser.add_argument("--seconds", type=positive_seconds, default=10)
     parser.add_argument("--mode", choices=["fast", "accurate"], default="fast")
     args = parser.parse_args()
 

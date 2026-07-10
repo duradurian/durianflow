@@ -2,7 +2,7 @@
 
 ## Speech worker does not start
 
-The default desktop path needs a Python environment at `backend/.venv/Scripts/python.exe`. Recreate it from [local-setup.md](local-setup.md), or set `OPENFLOW_PYTHON` to a working Python interpreter. The desktop status window reports worker/model startup failures.
+The default desktop path needs a Python environment at `backend/.venv/Scripts/python.exe`. Recreate it from [local-setup.md](local-setup.md), or set `DURIANFLOW_PYTHON` to a working Python interpreter (`OPENFLOW_PYTHON` is also accepted for compatibility). The desktop status window reports worker/model startup failures.
 
 ## Model stays unavailable
 
@@ -10,19 +10,20 @@ Check `backend/.env`, model location, and network access. With downloads disable
 
 ## Desktop hotkey does not trigger
 
-Another program may own the accelerator. Change `hotkey` in Settings and restart the desktop application.
+Another program may own the accelerator. Change the hotkey in Settings; Durianflow applies the replacement immediately and reports if registration fails.
 
 ## Transcript does not paste
 
-Openflow writes the transcript to the clipboard then sends synthetic `Ctrl+V`. Focus a normal editable field before stopping. If the target blocks synthetic paste, disable `autoPaste`; the transcript remains on the clipboard.
+Durianflow writes the transcript to the clipboard then sends synthetic `Ctrl+V`. Focus a normal editable field before stopping. If the target blocks synthetic paste, disable `autoPaste`; the transcript remains on the clipboard.
 
 ## Microphone permission denied
 
-Enable microphone access for desktop apps in Windows Privacy & security settings, then restart Openflow.
+Enable microphone access for desktop apps in Windows Privacy & security settings, then restart Durianflow.
 
 ## CUDA is unavailable or a CUDA DLL is missing
 
-Temporarily use CPU mode:
+For the desktop app, choose **CPU** under **Advanced Settings > Speech Model**.
+For a directly launched worker, use:
 
 ```env
 DEVICE=cpu

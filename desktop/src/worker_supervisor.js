@@ -89,6 +89,7 @@ class WorkerSupervisor extends EventEmitter {
     this.waitingDrain = false;
     this.startTimer = null;
     this.shutdownTimer = null;
+    this.stopPromise = null;
     this.intentionalExit = false;
     this.controlSequence = 0;
   }
@@ -96,6 +97,7 @@ class WorkerSupervisor extends EventEmitter {
   start() {
     if (this.child) return Promise.reject(new Error("Worker is already running"));
     this.state = "starting";
+    this.modelState = "unknown";
     this.intentionalExit = false;
     this.stderr = Buffer.alloc(0);
     const { command, args = [], cwd, env, windowsHide = true } = this.options;
@@ -119,6 +121,9 @@ class WorkerSupervisor extends EventEmitter {
       this.emit("stderr", chunk.toString("utf8"));
     });
     child.stdin.on("drain", () => { this.waitingDrain = false; this._flushWrites(); });
+    child.stdin.on("error", (error) => {
+      if (this.child === child && !this.intentionalExit) this._protocolFailure(error);
+    });
     child.once("error", (error) => this._onExit(error, null));
     child.once("exit", (code, signal) => this._onExit(null, { code, signal }));
     this.startTimer = setTimeout(() => {
@@ -130,9 +135,15 @@ class WorkerSupervisor extends EventEmitter {
     return new Promise((resolve, reject) => {
       const ready = (message) => { cleanup(); resolve(message); };
       const failed = (error) => { cleanup(); reject(error); };
-      const cleanup = () => { this.off("ready", ready); this.off("fatal", failed); };
+      const exited = () => failed(new ProtocolError("Worker exited before becoming ready", "WORKER_EXITED"));
+      const cleanup = () => {
+        this.off("ready", ready);
+        this.off("fatal", failed);
+        this.off("exit", exited);
+      };
       this.once("ready", ready);
       this.once("fatal", failed);
+      this.once("exit", exited);
     });
   }
 
@@ -170,12 +181,16 @@ class WorkerSupervisor extends EventEmitter {
       if (this.state !== "starting") return;
       clearTimeout(this.startTimer);
       this.startTimer = null;
+      this.modelState = String(message.modelState || "unknown");
       this.state = "ready";
       this.emit("ready", message);
     }
     if (message.type === "model_state") this.modelState = String(message.state || "unknown");
     this.emit("event", message);
-    this.emit(message.type, message);
+    // "error" is reserved by EventEmitter and throws when it has no listener.
+    // Worker error records are ordinary protocol events, not supervisor faults.
+    if (message.type === "error") this.emit("worker_error", message);
+    else this.emit(message.type, message);
   }
 
   _protocolFailure(error) {
@@ -194,6 +209,8 @@ class WorkerSupervisor extends EventEmitter {
     this.queuedBytes = 0;
     const previous = this.state;
     this.state = "stopped";
+    this.modelState = "unknown";
+    this.stopPromise = null;
     const detail = { error, ...exit, intentional: this.intentionalExit, stderr: this.stderr.toString("utf8") };
     this.emit("exit", detail);
     if (!this.intentionalExit && previous !== "stopped") this.emit("fatal", new ProtocolError("Worker exited unexpectedly", "WORKER_EXITED"));
@@ -201,18 +218,30 @@ class WorkerSupervisor extends EventEmitter {
 
   stop({ force = false } = {}) {
     if (!this.child) return Promise.resolve();
+    if (this.stopPromise) {
+      if (force && this.child) this.child.kill();
+      return this.stopPromise;
+    }
     this.intentionalExit = true;
-    if (force) { this.child.kill(); return Promise.resolve(); }
     this.state = "stopping";
-    try { this.send({ type: "shutdown", sequence: ++this.controlSequence }); } catch { this.child.kill(); return Promise.resolve(); }
-    return new Promise((resolve) => {
-      const done = () => { clearTimeout(this.shutdownTimer); resolve(); };
+    this.stopPromise = new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(this.shutdownTimer);
+        resolve();
+      };
       this.once("exit", done);
-      this.once("shutdown_ack", () => {
-        if (this.child) this.child.kill();
-      });
       this.shutdownTimer = setTimeout(() => { if (this.child) this.child.kill(); }, this.options.shutdownTimeoutMs);
     });
+    if (force) {
+      this.child.kill();
+      return this.stopPromise;
+    }
+    try {
+      this.send({ type: "shutdown", sequence: ++this.controlSequence });
+    } catch {
+      if (this.child) this.child.kill();
+    }
+    return this.stopPromise;
   }
 }
 

@@ -44,3 +44,34 @@ def test_start_validation_normalizes_session_id() -> None:
         Settings(),
     )
     assert command["start"].session_id == "session"
+
+
+def test_start_validation_reads_camel_case_sample_rate() -> None:
+    with pytest.raises(ProtocolError, match="16000 Hz"):
+        validate_command(
+            envelope(
+                "start",
+                sessionId="session",
+                generation=2,
+                sampleRate=48000,
+                channels=1,
+                format="pcm_s16le",
+                language="en",
+                mode="fast",
+            ),
+            Settings(),
+        )
+
+
+def test_validation_rejects_boolean_integer_fields_and_unexpected_start_fields() -> None:
+    with pytest.raises(ProtocolError, match="protocolVersion"):
+        validate_command({"protocolVersion": True, "type": "hello", "sequence": 0}, Settings())
+    with pytest.raises(ProtocolError, match="sequence"):
+        validate_command({"protocolVersion": 1, "type": "hello", "sequence": True}, Settings())
+    with pytest.raises(ProtocolError, match="generation"):
+        validate_command(envelope("stop", sessionId="session", generation=False), Settings())
+    with pytest.raises(ProtocolError, match="extra"):
+        validate_command(
+            envelope("start", sessionId="session", generation=1, unexpected=True),
+            Settings(),
+        )

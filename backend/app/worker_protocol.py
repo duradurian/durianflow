@@ -36,7 +36,10 @@ def validate_start_message(raw: Any, settings: Settings) -> StartMessage:
         or message.channels != settings.CHANNELS
         or message.format != "pcm_s16le"
     ):
-        raise ValueError("Expected pcm_s16le, mono, 16000 Hz audio.")
+        raise ValueError(
+            f"Expected pcm_s16le, {settings.CHANNELS} channel(s), "
+            f"{settings.SAMPLE_RATE} Hz audio."
+        )
     return message
 
 
@@ -72,23 +75,28 @@ def write_record(stream: BinaryIO, record: Mapping[str, Any]) -> None:
 
 def validate_command(record: Mapping[str, Any], settings: Settings) -> dict[str, Any]:
     """Validate common envelope fields and normalize an inbound command."""
-    if record.get("protocolVersion") != PROTOCOL_VERSION:
+    if type(record.get("protocolVersion")) is not int or record["protocolVersion"] != PROTOCOL_VERSION:
         raise ProtocolError("unsupported protocolVersion")
     command_type = record.get("type")
     if command_type not in {"hello", "start", "audio", "stop", "cancel", "shutdown"}:
         raise ProtocolError("unsupported command type")
     sequence = record.get("sequence")
-    if not isinstance(sequence, int) or sequence < 0:
+    if type(sequence) is not int or sequence < 0:
         raise ProtocolError("sequence must be a non-negative integer")
     if command_type in {"start", "audio", "stop", "cancel"}:
-        if not isinstance(record.get("sessionId"), str) or not record["sessionId"]:
+        session_id = record.get("sessionId")
+        if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 256:
             raise ProtocolError("sessionId is required")
-        if not isinstance(record.get("generation"), int) or record["generation"] < 0:
+        if type(record.get("generation")) is not int or record["generation"] < 0:
             raise ProtocolError("generation must be a non-negative integer")
     command = dict(record)
     if command_type == "start":
         start = dict(record)
         start["session_id"] = start.pop("sessionId")
+        if "sampleRate" in start:
+            if "sample_rate" in start:
+                raise ProtocolError("start cannot contain both sampleRate and sample_rate")
+            start["sample_rate"] = start.pop("sampleRate")
         start.pop("protocolVersion", None)
         start.pop("generation", None)
         start.pop("sequence", None)

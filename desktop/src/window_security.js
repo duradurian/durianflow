@@ -32,15 +32,46 @@ function assertTrustedFileSender(event) {
   }
 }
 
+function hasFileProtocol(value) {
+  try {
+    return new URL(String(value || "")).protocol === "file:";
+  } catch {
+    return false;
+  }
+}
+
+function isMediaWindow(webContents, getMediaWindows) {
+  return Boolean(webContents) && getMediaWindows().some((window) => (
+    window
+    && !window.isDestroyed()
+    && window.webContents === webContents
+    && hasFileProtocol(webContents.getURL())
+  ));
+}
+
 function installPermissionPolicy(session, getMediaWindows) {
-  session.setPermissionRequestHandler((webContents, permission, callback) => {
-    const windows = getMediaWindows();
-    callback(permission === "media" && windows.some((window) => window?.webContents === webContents));
+  session.setPermissionCheckHandler((webContents, permission, requestingOrigin, details = {}) => {
+    return permission === "media"
+      && details.mediaType === "audio"
+      && hasFileProtocol(requestingOrigin || details.securityOrigin || details.requestingUrl)
+      && isMediaWindow(webContents, getMediaWindows);
+  });
+  session.setPermissionRequestHandler((webContents, permission, callback, details = {}) => {
+    const mediaTypes = Array.isArray(details.mediaTypes) ? details.mediaTypes : [];
+    const requestingUrl = details.requestingUrl || details.securityOrigin || webContents?.getURL();
+    callback(
+      permission === "media"
+      && mediaTypes.length > 0
+      && mediaTypes.every((mediaType) => mediaType === "audio")
+      && hasFileProtocol(requestingUrl)
+      && isMediaWindow(webContents, getMediaWindows),
+    );
   });
 }
 
 module.exports = {
   assertTrustedFileSender,
+  hasFileProtocol,
   installPermissionPolicy,
   isTrustedFileSender,
   registerTrustedWindow,

@@ -50,4 +50,8 @@ class EnergyVad:
                     self.silence_samples = 0
                     speech_ended = True
 
-        return VadResult(self.in_speech or frame_is_speech, speech_started, speech_ended)
+        # ``is_speech`` describes this frame, while ``in_speech`` retains the
+        # hysteresis state used to decide when an utterance has ended.  Keeping
+        # those concepts separate lets callers apply a bounded trailing pad
+        # instead of buffering the entire silence window.
+        return VadResult(frame_is_speech, speech_started, speech_ended)

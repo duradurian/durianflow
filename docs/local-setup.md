@@ -18,7 +18,7 @@ npm install
 npm start
 ```
 
-The desktop app resolves `backend/.venv/Scripts/python.exe` by default. Set `OPENFLOW_PYTHON` to an explicit interpreter path only when that default is unsuitable.
+The desktop app resolves `backend/.venv/Scripts/python.exe` by default. Set `DURIANFLOW_PYTHON` to an explicit interpreter path only when that default is unsuitable. `OPENFLOW_PYTHON` remains a compatibility alias.
 
 Press `Ctrl+Alt+Space` to start dictation, then press it again to stop, finalize, and paste the transcript into the focused textbox.
 
@@ -26,14 +26,16 @@ Press `Ctrl+Alt+Space` to start dictation, then press it again to stop, finalize
 
 With `ALLOW_MODEL_DOWNLOAD=true`, worker startup can download/cache the selected model. For offline startup, install a model explicitly with `scripts/install_model.py`, or set `MODEL_PATH` and set `ALLOW_MODEL_DOWNLOAD=false`.
 
-CPU configuration in `backend/.env`:
+The Electron desktop owns its worker's model, device, compute type, and CUDA fallback policy. It defaults to **CPU**; choose **NVIDIA GPU (CUDA)** in **Advanced Settings > Speech Model** after installing its runtime dependencies. The following `.env` settings apply when launching `scripts/run_worker.py` or backend utilities directly.
+
+Direct-worker CPU configuration in `backend/.env`:
 
 ```env
 DEVICE=cpu
 COMPUTE_TYPE=int8
 ```
 
-NVIDIA configuration:
+Direct-worker NVIDIA configuration:
 
 ```env
 DEVICE=cuda

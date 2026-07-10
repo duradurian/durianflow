@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*;">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Openflow Advanced Settings</title>
+    <title>Durianflow Advanced Settings</title>
     <style>
       :root {
         color-scheme: light dark;
@@ -307,8 +307,8 @@
             <label>
               Compute device
               <select id="computeDevice" name="computeDevice">
-                <option value="cuda">NVIDIA GPU (CUDA)</option>
                 <option value="cpu">CPU</option>
+                <option value="cuda">NVIDIA GPU (CUDA)</option>
               </select>
               <span class="helper">Changing devices fully replaces the local speech worker. CPU uses RAM with int8 inference; CUDA uses GPU VRAM and never falls back to CPU.</span>
             </label>

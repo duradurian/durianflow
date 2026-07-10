@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 
 
@@ -24,6 +26,10 @@ def ensure_mono(audio: np.ndarray) -> np.ndarray:
 
 
 def seconds_to_samples(seconds: float, sample_rate: int) -> int:
+    if sample_rate <= 0:
+        raise ValueError("sample_rate must be positive")
+    if not math.isfinite(seconds):
+        raise ValueError("seconds must be finite")
     return max(0, int(round(seconds * sample_rate)))
 
 
@@ -36,6 +42,8 @@ def samples_to_seconds(samples: int, sample_rate: int) -> float:
 def trim_or_pad(audio: np.ndarray, sample_rate: int, max_seconds: float) -> np.ndarray:
     max_samples = seconds_to_samples(max_seconds, sample_rate)
     arr = ensure_mono(audio)
+    if max_samples == 0:
+        return np.empty(0, dtype=arr.dtype)
     if len(arr) > max_samples:
         return arr[-max_samples:]
     if len(arr) < max_samples:

@@ -20,7 +20,18 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.config import Settings, get_settings  # noqa: E402
-from app.model_store import expected_model_path, is_valid_model_dir  # noqa: E402
+from app.model_store import (  # noqa: E402
+    cached_model_snapshot,
+    expected_model_path,
+    is_valid_model_dir,
+    is_link_or_junction,
+    model_cache_path,
+    model_dir_name,
+    model_repository,
+    remove_managed_path,
+    MODEL_FILE_REQUIREMENTS,
+    validate_managed_path,
+)
 from app.schemas import AVAILABLE_MODELS  # noqa: E402
 
 
@@ -52,16 +63,6 @@ def directory_size(path: Path) -> int:
     return total
 
 
-def model_repository(model_name: str) -> str:
-    """Resolve faster-whisper aliases without duplicating its model catalogue."""
-    try:
-        from faster_whisper.utils import _MODELS  # type: ignore[attr-defined]
-
-        return str(_MODELS.get(model_name, model_name))
-    except Exception:
-        return model_name
-
-
 def models_dir(settings: Settings) -> Path:
     configured = Path(settings.MODELS_DIR).expanduser()
     if not configured.is_absolute():
@@ -70,17 +71,11 @@ def models_dir(settings: Settings) -> Path:
 
 
 def cache_dir(settings: Settings) -> Path:
-    return models_dir(settings) / f"models--{model_repository(settings.MODEL_NAME).replace('/', '--')}"
+    return model_cache_path(settings)
 
 
 def cache_snapshot(path: Path) -> Path | None:
-    snapshots = path / "snapshots"
-    if not snapshots.is_dir():
-        return None
-    for candidate in sorted(snapshots.iterdir(), reverse=True):
-        if is_valid_model_dir(candidate):
-            return candidate
-    return None
+    return cached_model_snapshot(path)
 
 
 def managed_paths(settings: Settings) -> tuple[Path, Path]:
@@ -134,20 +129,26 @@ def cleanup_incomplete_downloads() -> dict[str, Any]:
     removed_bytes = 0
     if not root.exists():
         return {"type": "cleanup", "removed": removed, "removedBytes": removed_bytes, "message": "No incomplete downloads found"}
+    direct_names = {model_dir_name(model_name) for model_name in AVAILABLE_MODELS}
+    cache_names = {cache_dir(profile_settings(model_name)).name for model_name in AVAILABLE_MODELS}
+    temporary_names = {
+        f".{name}{suffix}"
+        for name in direct_names
+        for suffix in (".download", ".tmp")
+    }
     for candidate in root.iterdir():
-        if not candidate.is_dir() or candidate.name == ".locks":
+        if not candidate.is_dir() or is_link_or_junction(candidate):
             continue
-        is_temporary = candidate.name.startswith(".") and candidate.name.endswith(".download")
-        is_incomplete_cache = candidate.name.startswith("models--") and cache_snapshot(candidate) is None
+        is_temporary = candidate.name in temporary_names
+        is_incomplete_cache = candidate.name in cache_names and cache_snapshot(candidate) is None
         is_incomplete_direct = (
-            not candidate.name.startswith(".")
-            and not candidate.name.startswith("models--")
+            candidate.name in direct_names
             and not is_valid_model_dir(candidate)
         )
         if not (is_temporary or is_incomplete_cache or is_incomplete_direct):
             continue
         removed_bytes += directory_size(candidate)
-        shutil.rmtree(candidate)
+        remove_managed_path(root, candidate)
         removed.append(str(candidate))
     return {
         "type": "cleanup",
@@ -169,8 +170,8 @@ def download(model_name: str, json_output: bool) -> dict[str, Any]:
     target, _cache = managed_paths(settings)
     temporary = target.parent / f".{target.name}.download"
     target.parent.mkdir(parents=True, exist_ok=True)
-    if temporary.exists():
-        shutil.rmtree(temporary)
+    if temporary.exists() or is_link_or_junction(temporary):
+        remove_managed_path(target.parent, temporary)
     temporary.mkdir()
 
     total_bytes = current.get("totalBytes")
@@ -212,15 +213,21 @@ def download(model_name: str, json_output: bool) -> dict[str, Any]:
         except TypeError:
             downloaded_path = download_model(model_name, cache_dir=str(temporary), local_files_only=False)
         resolved = Path(downloaded_path).expanduser().resolve() if downloaded_path else temporary
-        if target.exists():
-            shutil.rmtree(target)
+        if not is_valid_model_dir(resolved):
+            raise RuntimeError(
+                f"Downloaded model is incomplete; expected {MODEL_FILE_REQUIREMENTS}."
+            )
+        if target.exists() or is_link_or_junction(target):
+            remove_managed_path(target.parent, target)
         if resolved != temporary:
             shutil.copytree(resolved, target)
-            shutil.rmtree(temporary, ignore_errors=True)
+            remove_managed_path(target.parent, temporary)
         else:
             temporary.replace(target)
         if not is_valid_model_dir(target):
-            raise RuntimeError("Downloaded model is incomplete; expected model.bin and config.json.")
+            raise RuntimeError(
+                f"Downloaded model is incomplete; expected {MODEL_FILE_REQUIREMENTS}."
+            )
     finally:
         stop_monitor.set()
         monitor.join(timeout=1)
@@ -234,11 +241,19 @@ def download(model_name: str, json_output: bool) -> dict[str, Any]:
 def delete(model_name: str, json_output: bool) -> dict[str, Any]:
     settings = profile_settings(model_name)
     target, cache = managed_paths(settings)
+    candidates = [
+        candidate
+        for candidate in (target, cache)
+        if candidate.exists() or is_link_or_junction(candidate)
+    ]
+    root = models_dir(settings)
+    for candidate in candidates:
+        validate_managed_path(root, candidate)
+
     removed_bytes = 0
-    for candidate in (target, cache):
-        if candidate.exists():
-            removed_bytes += directory_size(candidate)
-            shutil.rmtree(candidate)
+    for candidate in candidates:
+        removed_bytes += directory_size(candidate)
+        remove_managed_path(root, candidate)
     result = status(model_name)
     result.update({"type": "deleted", "removedBytes": removed_bytes, "message": "Model download deleted"})
     emit(result, json_output)
@@ -261,7 +276,7 @@ def main() -> None:
     parser.add_argument("--include-remote", action="store_true", help="Fetch best-effort model size metadata for status.")
     args = parser.parse_args()
     model_name = args.model or get_settings().MODEL_NAME
-    if model_name not in AVAILABLE_MODELS:
+    if args.action in {"status", "download", "delete"} and model_name not in AVAILABLE_MODELS:
         emit({"type": "error", "message": "Unsupported faster-whisper model profile."}, args.json)
         raise SystemExit(2)
     try:

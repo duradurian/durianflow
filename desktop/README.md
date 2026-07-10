@@ -1,4 +1,4 @@
-# Openflow Desktop
+# Durianflow Desktop
 
 Run the Electron client from this directory:
 
@@ -24,8 +24,10 @@ supplies metadata. The app removes stale incomplete model downloads before it
 starts the worker. It can delete managed model downloads; it does not delete an
 external `MODEL_PATH`.
 
-Choose **NVIDIA GPU (CUDA)** or **CPU** in the Speech Model panel. The selected
+The first-run default is **CPU**; choose **NVIDIA GPU (CUDA)** after installing
+its runtime dependencies. The selected device in the Speech Model panel
 device restarts the local worker; CPU uses int8 inference and changes the main
 Settings resource meter from GPU memory to combined app and worker RAM.
 
-Run `npm run check` to syntax-check desktop source files.
+Run `npm run check` to syntax-check desktop source files and `npm test` for the
+desktop unit tests.

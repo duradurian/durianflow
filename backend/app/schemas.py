@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 AudioFormat = Literal["pcm_s16le"]
@@ -9,12 +9,14 @@ StatusValue = Literal["listening", "speech_started", "speech_ended", "transcribi
 
 
 class StartMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     type: Literal["start"]
-    session_id: str
-    sample_rate: int = 16000
-    channels: int = 1
+    session_id: str = Field(min_length=1, max_length=256)
+    sample_rate: int = Field(default=16000, gt=0)
+    channels: int = Field(default=1, gt=0)
     format: AudioFormat = "pcm_s16le"
-    language: str | None = "en"
+    language: str | None = Field(default="en", min_length=1, max_length=32)
     mode: TranscriptionMode = "fast"
 
 

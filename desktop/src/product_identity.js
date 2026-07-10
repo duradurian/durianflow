@@ -1,4 +1,4 @@
-const PRODUCT_NAME = "Openflow";
+const PRODUCT_NAME = "Durianflow";
 
 module.exports = {
   PRODUCT_NAME,

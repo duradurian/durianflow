@@ -1,4 +1,5 @@
 const { contextBridge, ipcRenderer } = require("electron");
+const MAX_AUDIO_FRAME_BYTES = 64 * 1024;
 
 function subscribe(channel, callback) {
   if (typeof callback !== "function") {
@@ -14,6 +15,9 @@ function assertArrayBuffer(value) {
   if (!(value instanceof ArrayBuffer)) {
     throw new TypeError("Audio must be an ArrayBuffer");
   }
+  if (value.byteLength === 0 || value.byteLength > MAX_AUDIO_FRAME_BYTES || value.byteLength % 2 !== 0) {
+    throw new RangeError("Audio must be a non-empty PCM16 frame no larger than 64 KiB");
+  }
 }
 
 const dictation = Object.freeze({
@@ -24,6 +28,7 @@ const dictation = Object.freeze({
   },
   stop: () => ipcRenderer.invoke("dictation:stop"),
   cancel: () => ipcRenderer.invoke("dictation:cancel"),
+  reset: () => ipcRenderer.invoke("dictation:reset"),
   getState: () => ipcRenderer.invoke("dictation:state:get"),
   onStatus: (callback) => subscribe("dictation:status", callback),
   onTranscript: (callback) => subscribe("dictation:transcript", callback),

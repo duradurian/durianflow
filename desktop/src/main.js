@@ -4,6 +4,8 @@ const { randomUUID } = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { captureClipboard, restoreClipboard } = require("./clipboard_snapshot");
+const { loadJsonConfig, writeJsonAtomic } = require("./config_store");
 const { PRODUCT_NAME, SETTINGS_TITLE, ADVANCED_SETTINGS_TITLE } = require("./product_identity");
 const {
   DEFAULT_LLAMACPP_URL,
@@ -22,10 +24,13 @@ const { createDictationTransport } = require("./dictation_transport");
 const {
   assertTrustedFileSender,
   installPermissionPolicy,
-  isTrustedFileSender,
   registerTrustedWindow,
   secureWebPreferences,
 } = require("./window_security");
+
+// Chromium command-line switches must be registered before the ready event.
+app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 const VOICE_MODELS = Object.freeze([
   "tiny",
@@ -45,7 +50,7 @@ const DEFAULT_CONFIG = {
   selectedInputDeviceId: "",
   autoPaste: true,
   appendSpace: true,
-  computeDevice: "cuda",
+  computeDevice: "cpu",
   fastVoiceModel: "large-v3-turbo",
   accurateVoiceModel: "large-v3-turbo",
   llmEnabled: false,
@@ -59,9 +64,17 @@ const DEFAULT_CONFIG = {
   llmLatencyBudgetMs: 700,
   llmMaxBlockingChars: 250,
 };
+const CONFIG_KEYS = new Set(Object.keys(DEFAULT_CONFIG));
+const MAX_AUDIO_FRAME_BYTES = 64 * 1024;
+const MAX_TRANSCRIPT_CHARS = 100_000;
+const MODEL_READINESS_TIMEOUT_MS = 60 * 60 * 1000;
+const MODEL_DOWNLOAD_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 
 let config = { ...DEFAULT_CONFIG };
+let configLoadWarning = "";
+let shouldPersistLoadedConfig = true;
 let recorderWindow;
+let recorderWindowReady = Promise.resolve();
 let statusWindow;
 let settingsWindow;
 let advancedSettingsWindow;
@@ -70,8 +83,11 @@ let localWorkerTransport;
 let localWorkerModelName = null;
 let localWorkerDevice = null;
 let hotkeyWatcherProcess;
+let shortcutRegistrationActive = false;
 let isRecording = false;
 let isStartingDictation = false;
+let isFinalizingDictation = false;
+let dictationForegroundTarget = null;
 let cancelStartingDictation = false;
 let dictationStartAbortController;
 let isQuitting = false;
@@ -79,6 +95,13 @@ let isCapturingHotkey = false;
 let llmLoadState = { key: "", state: "off", provider: "", baseUrl: "", model: "" };
 let llmLoadRequestId = 0;
 let modelManagementOperation = null;
+const modelManagementProcesses = new Set();
+let workerLifecycleQueue = Promise.resolve();
+let configSaveQueue = Promise.resolve();
+let quitShutdownPromise = null;
+let shutdownComplete = false;
+let dictationFailureRecovery = null;
+let dictationCompletionPromise = null;
 
 const rootDir = path.resolve(__dirname, "..", "..");
 const backendDir = path.join(rootDir, "backend");
@@ -98,12 +121,10 @@ function configPath() {
 }
 
 function loadConfig() {
-  try {
-    const raw = fs.readFileSync(configPath(), "utf8");
-    config = sanitizeConfig(JSON.parse(raw));
-  } catch {
-    config = { ...DEFAULT_CONFIG };
-  }
+  const result = loadJsonConfig(configPath(), DEFAULT_CONFIG, sanitizeConfig);
+  config = result.value;
+  configLoadWarning = result.warning;
+  shouldPersistLoadedConfig = !result.warning || Boolean(result.backupPath);
 }
 
 function acceleratorParts(accelerator) {
@@ -130,11 +151,11 @@ function isSafeAccelerator(accelerator) {
 }
 
 function sanitizeConfig(nextConfig) {
-  const source = { ...(nextConfig || {}) };
-  for (const key of ["backendUrl", "healthUrl", "backendApiToken", "allowRemoteBackend", "autoStartBackend", "dictationTransport"]) {
-    delete source[key];
-  }
+  const source = nextConfig && typeof nextConfig === "object" && !Array.isArray(nextConfig)
+    ? nextConfig
+    : {};
   const booleanSetting = (value, defaultValue) => (typeof value === "boolean" ? value : defaultValue);
+  const stringSetting = (value, defaultValue, maxLength) => String(value ?? defaultValue).trim().slice(0, maxLength);
   const numericSetting = (value, defaultValue, min, max) => {
     const number = Number(value);
     if (!Number.isFinite(number)) {
@@ -142,7 +163,7 @@ function sanitizeConfig(nextConfig) {
     }
     return Math.min(max, Math.max(min, Math.round(number)));
   };
-  const hotkey = String(source.hotkey || DEFAULT_CONFIG.hotkey).trim();
+  const hotkey = stringSetting(source.hotkey || DEFAULT_CONFIG.hotkey, DEFAULT_CONFIG.hotkey, 128);
   const llmMode = ["off", "grammar", "format", "enhance"].includes(source.llmMode)
     ? source.llmMode
     : DEFAULT_CONFIG.llmMode;
@@ -154,27 +175,28 @@ function sanitizeConfig(nextConfig) {
 
   return {
     ...DEFAULT_CONFIG,
-    ...source,
     hotkey: isSafeAccelerator(hotkey) ? hotkey : DEFAULT_CONFIG.hotkey,
-    language: source.language ? String(source.language).trim() : null,
+    language: source.language === null || source.language === ""
+      ? null
+      : stringSetting(source.language, DEFAULT_CONFIG.language, 32),
     mode: source.mode === "accurate" ? "accurate" : "fast",
     inputBehavior: source.inputBehavior === "hold" ? "hold" : "toggle",
-    selectedInputDeviceId: String(source.selectedInputDeviceId || ""),
+    selectedInputDeviceId: stringSetting(source.selectedInputDeviceId, "", 512),
     autoPaste: booleanSetting(source.autoPaste, DEFAULT_CONFIG.autoPaste),
     appendSpace: booleanSetting(source.appendSpace, DEFAULT_CONFIG.appendSpace),
-    computeDevice: source.computeDevice === "cpu" ? "cpu" : "cuda",
+    computeDevice: source.computeDevice === "cuda" ? "cuda" : "cpu",
     fastVoiceModel: voiceModel(source.fastVoiceModel, DEFAULT_CONFIG.fastVoiceModel),
     accurateVoiceModel: voiceModel(source.accurateVoiceModel, DEFAULT_CONFIG.accurateVoiceModel),
     llmEnabled: booleanSetting(source.llmEnabled, DEFAULT_CONFIG.llmEnabled),
     llmProvider,
     llmServerUrl: sanitizeHttpServiceUrl(source.llmServerUrl, DEFAULT_LLM_URL, allowRemoteLlm),
-    llmModel: String(source.llmModel || DEFAULT_CONFIG.llmModel).trim(),
+    llmModel: stringSetting(source.llmModel || DEFAULT_CONFIG.llmModel, DEFAULT_CONFIG.llmModel, 256),
     ollamaServerUrl: sanitizeHttpServiceUrl(
       source.ollamaServerUrl,
       DEFAULT_CONFIG.ollamaServerUrl,
       allowRemoteLlm,
     ),
-    ollamaModel: String(source.ollamaModel || DEFAULT_CONFIG.ollamaModel).trim(),
+    ollamaModel: stringSetting(source.ollamaModel || DEFAULT_CONFIG.ollamaModel, DEFAULT_CONFIG.ollamaModel, 256),
     allowRemoteLlm,
     llmMode,
     llmLatencyBudgetMs: numericSetting(
@@ -193,8 +215,7 @@ function sanitizeConfig(nextConfig) {
 }
 
 function saveConfig() {
-  fs.mkdirSync(app.getPath("userData"), { recursive: true });
-  fs.writeFileSync(configPath(), JSON.stringify(config, null, 2));
+  writeJsonAtomic(configPath(), config);
 }
 
 function llmDescriptor(sourceConfig = config) {
@@ -241,6 +262,10 @@ function llmStatus(sourceConfig = config) {
   if (llmLoadState.key === key && llmLoadState.state === "ready") {
     const model = llmDescriptor(sourceConfig).model;
     return { state: "ready", message: model || "Ready" };
+  }
+
+  if (llmLoadState.key === key && llmLoadState.state === "unavailable") {
+    return { state: "unavailable", message: llmLoadState.message || "Unavailable" };
   }
 
   return { state: "starting", message: "Starting" };
@@ -314,7 +339,11 @@ async function preloadConfiguredLlm(sourceConfig = config, options = {}) {
   const result = await preloadLlm(preloadConfig);
 
   if (requestId === llmLoadRequestId) {
-    llmLoadState = { ...descriptor, state: result.ok ? "ready" : "starting" };
+    llmLoadState = {
+      ...descriptor,
+      state: result.ok ? "ready" : "unavailable",
+      message: result.ok ? "" : `Unavailable (${result.status || "request failed"})`,
+    };
     notifyLlmStatusUpdated(preloadConfig);
   }
 
@@ -332,7 +361,7 @@ function preloadConfiguredLlmInBackground(sourceConfig = config, options = {}) {
   preloadConfiguredLlm(sourceConfig, options).catch(() => {
     const descriptor = llmDescriptor(sourceConfig);
     if (llmLoadState.key === descriptor.key) {
-      llmLoadState = { ...descriptor, state: "starting" };
+      llmLoadState = { ...descriptor, state: "unavailable", message: "Unavailable" };
       notifyLlmStatusUpdated(sourceConfig);
     }
   });
@@ -349,9 +378,14 @@ function createTrayIcon() {
 }
 
 function setTrayMenu() {
-  const label = isRecording || isStartingDictation ? "Stop" : "Dictate";
+  if (!tray || tray.isDestroyed()) return;
+  const label = isFinalizingDictation
+    ? "Finishing..."
+    : isRecording || isStartingDictation
+      ? "Stop"
+      : "Dictate";
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label, click: toggleDictation },
+    { label, click: toggleDictation, enabled: !isFinalizingDictation },
     { label: "Settings", click: openSettingsWindow },
     { type: "separator" },
     {
@@ -376,7 +410,10 @@ function createRecorderWindow() {
     }),
   });
 
-  recorderWindow.loadFile(path.join(__dirname, "recorder.html"));
+  recorderWindowReady = recorderWindow.loadFile(path.join(__dirname, "recorder.html"));
+  recorderWindowReady.catch((error) => {
+    console.error("Could not load recorder window:", error);
+  });
   registerTrustedWindow(recorderWindow);
 }
 
@@ -600,6 +637,7 @@ function stopHotkeyWatcher() {
 function stopShortcutRegistration() {
   globalShortcut.unregisterAll();
   stopHotkeyWatcher();
+  shortcutRegistrationActive = false;
 }
 
 function keyToVirtualKey(key) {
@@ -710,6 +748,7 @@ while ($true) {
     let watcher;
     let ready = false;
     let settled = false;
+    let stdoutBuffer = "";
     const settle = (result) => {
       if (!settled) {
         settled = true;
@@ -736,8 +775,12 @@ while ($true) {
     }
     hotkeyWatcherProcess = watcher;
 
-    watcher.stdout.on("data", (chunk) => {
-      for (const line of chunk.toString().split(/\r?\n/)) {
+    const handleWatcherOutput = (chunk, flush = false) => {
+      stdoutBuffer += chunk;
+      const lines = stdoutBuffer.split(/\r?\n/);
+      stdoutBuffer = flush ? "" : lines.pop() || "";
+      if (flush && stdoutBuffer) lines.push(stdoutBuffer);
+      for (const line of lines) {
         const event = line.trim();
         if (event === "READY") {
           ready = true;
@@ -752,18 +795,23 @@ while ($true) {
           stopDictation();
         }
       }
-    });
+    };
+
+    watcher.stdout.on("data", (chunk) => handleWatcherOutput(chunk.toString()));
 
     watcher.on("error", () => {
       if (hotkeyWatcherProcess === watcher) {
         hotkeyWatcherProcess = null;
+        shortcutRegistrationActive = false;
         showStatus("error", `Could not monitor hotkey: ${config.hotkey}`, true);
       }
       settle(false);
     });
     watcher.on("exit", () => {
+      handleWatcherOutput("", true);
       if (hotkeyWatcherProcess === watcher) {
         hotkeyWatcherProcess = null;
+        shortcutRegistrationActive = false;
         if (ready) {
           showStatus("error", `Could not monitor hotkey: ${config.hotkey}`, true);
         }
@@ -780,14 +828,22 @@ async function applyShortcutRegistration() {
   }
 
   if (config.inputBehavior === "hold") {
-    return startKeyStateWatcher("hold");
+    shortcutRegistrationActive = await startKeyStateWatcher("hold");
+    return shortcutRegistrationActive;
   }
 
-  const ok = globalShortcut.register(config.hotkey, toggleDictation);
+  let ok = false;
+  try {
+    ok = globalShortcut.register(config.hotkey, toggleDictation);
+  } catch {
+    ok = false;
+  }
   if (ok) {
+    shortcutRegistrationActive = true;
     return true;
   }
   if (await startKeyStateWatcher("toggle")) {
+    shortcutRegistrationActive = true;
     return true;
   }
   showStatus("error", `Could not register hotkey: ${config.hotkey}`, true);
@@ -902,12 +958,77 @@ function voiceModelForMode(mode = config.mode) {
   return mode === "accurate" ? config.accurateVoiceModel : config.fastVoiceModel;
 }
 
+function isSettingsSender(event, windows) {
+  return windows.some((window) => Boolean(
+    window
+    && !window.isDestroyed()
+    && event?.sender?.id === window.webContents.id,
+  ));
+}
+
+function assertSettingsSender(event) {
+  assertTrustedFileSender(event);
+  if (!isSettingsSender(event, [settingsWindow, advancedSettingsWindow])) {
+    throw new Error("Settings IPC is only available to settings windows");
+  }
+}
+
+function assertPrimarySettingsSender(event) {
+  assertTrustedFileSender(event);
+  if (!isSettingsSender(event, [settingsWindow])) {
+    throw new Error("This action is only available to the settings window");
+  }
+}
+
+function assertAdvancedSettingsSender(event) {
+  assertTrustedFileSender(event);
+  if (!isSettingsSender(event, [advancedSettingsWindow])) {
+    throw new Error("This action is only available to advanced settings");
+  }
+}
+
+function validatedConfigPatch(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Configuration update must be an object");
+  }
+  const patch = {};
+  for (const key of Object.keys(value)) {
+    if (!CONFIG_KEYS.has(key)) throw new TypeError(`Unsupported configuration field: ${key}`);
+    patch[key] = value[key];
+  }
+  return patch;
+}
+
+async function captureForegroundTarget() {
+  if (process.platform !== "win32") return null;
+  const script = [
+    "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class OpenflowForeground { [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow(); [DllImport(\"user32.dll\")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId); }'",
+    "$window = [OpenflowForeground]::GetForegroundWindow()",
+    "$processId = 0",
+    "[void][OpenflowForeground]::GetWindowThreadProcessId($window, [ref]$processId)",
+    "if ($window -ne [IntPtr]::Zero -and $processId -gt 0) { Write-Output ($window.ToInt64().ToString() + '|' + $processId.ToString()) }",
+  ].join("\n");
+  const output = await execFileText(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", script],
+    750,
+  );
+  const match = output.trim().match(/^(-?\d+)\|(\d+)$/);
+  return match ? { window: match[1], processId: match[2] } : null;
+}
+
+function sameForegroundTarget(left, right) {
+  return Boolean(left && right && left.window === right.window && left.processId === right.processId);
+}
+
 function requestedVoiceModel(value) {
   return VOICE_MODELS.includes(value) ? value : voiceModelForMode();
 }
 
 function workerLaunchOptions(modelName = voiceModelForMode()) {
-  const configuredPython = String(process.env.OPENFLOW_PYTHON || "").trim();
+  const configuredPython = String(
+    process.env.DURIANFLOW_PYTHON || process.env.OPENFLOW_PYTHON || "",
+  ).trim();
   const venvPython = path.join(backendDir, ".venv", "Scripts", "python.exe");
   const command = configuredPython || (fs.existsSync(venvPython) ? venvPython : "python");
   return {
@@ -915,13 +1036,17 @@ function workerLaunchOptions(modelName = voiceModelForMode()) {
     command,
     args: [path.join(backendDir, "scripts", "run_worker.py")],
     cwd: backendDir,
-    // Keep the worker environment intentionally small. PATH is needed for the
-    // interpreter/native DLL loader; backend configuration is read from .env.
+    // The worker has the same trust boundary as the desktop process and needs
+    // the user's CUDA, certificate, proxy, home and temporary-directory setup.
     env: {
+      ...process.env,
       PATH: process.env.PATH || "",
       PYTHONUNBUFFERED: "1",
       PYTHONUTF8: "1",
       MODEL_NAME: modelName,
+      // Desktop profiles are authoritative; an ambient MODEL_PATH must not
+      // silently make both Fast and Accurate load the same external model.
+      MODEL_PATH: "",
       DEVICE: config.computeDevice,
       COMPUTE_TYPE: config.computeDevice === "cpu" ? "int8" : "float16",
       // Device selection is explicit: CUDA failures must surface instead of
@@ -955,6 +1080,13 @@ function runSpeechModelManager(action, options = {}) {
   if (action !== "list" && action !== "cleanup") args.push("--model", modelName);
   if (options.includeRemote) args.push("--include-remote");
   const operation = { action };
+  const timeoutMs = options.timeoutMs ?? ({
+    status: 45_000,
+    cleanup: 60_000,
+    delete: 60_000,
+    download: MODEL_DOWNLOAD_TIMEOUT_MS,
+    list: 45_000,
+  }[action] || 0);
   if (exclusive) modelManagementOperation = operation;
 
   return new Promise((resolve, reject) => {
@@ -962,9 +1094,11 @@ function runSpeechModelManager(action, options = {}) {
     let stderr = "";
     let lastEvent = null;
     let settled = false;
+    let operationTimer = null;
     const finish = (callback, value) => {
       if (settled) return;
       settled = true;
+      clearTimeout(operationTimer);
       if (modelManagementOperation === operation) modelManagementOperation = null;
       callback(value);
     };
@@ -977,6 +1111,8 @@ function runSpeechModelManager(action, options = {}) {
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
+      operation.child = child;
+      modelManagementProcesses.add(child);
     } catch (error) {
       finish(reject, error);
       return;
@@ -1003,6 +1139,7 @@ function runSpeechModelManager(action, options = {}) {
     });
     child.once("error", (error) => finish(reject, error));
     child.once("close", (code) => {
+      modelManagementProcesses.delete(child);
       handleLine(stdout);
       if (code === 0 && lastEvent) {
         finish(resolve, lastEvent);
@@ -1011,14 +1148,114 @@ function runSpeechModelManager(action, options = {}) {
       const message = lastEvent?.message || stderr.trim() || `Speech model ${action} failed.`;
       finish(reject, new Error(message));
     });
+    if (timeoutMs > 0) {
+      operationTimer = setTimeout(() => {
+        if (child && child.exitCode === null) child.kill();
+        finish(reject, new Error(`Speech model ${action} timed out.`));
+      }, timeoutMs);
+    }
   });
 }
 
+function stopModelManagementProcesses() {
+  const processes = [...modelManagementProcesses];
+  if (!processes.length) return Promise.resolve();
+  return Promise.all(processes.map((child) => new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode) {
+      resolve();
+      return;
+    }
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    child.once("close", finish);
+    if (process.platform === "win32" && Number.isInteger(child.pid)) {
+      const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+        windowsHide: true,
+        stdio: "ignore",
+      });
+      killer.once("error", () => child.kill());
+    } else {
+      child.kill();
+    }
+    const timer = setTimeout(finish, 2500);
+  }))).then(() => undefined);
+}
+
+function runWorkerLifecycleOperation(operation) {
+  const result = workerLifecycleQueue.then(operation, operation);
+  workerLifecycleQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
 async function stopWorkerForSpeechModelOperation() {
-  if (!localWorkerTransport || localWorkerTransport.getState().worker === "stopped") {
-    return;
+  if (isRecording || isStartingDictation || isFinalizingDictation) {
+    throw new Error("Wait for dictation to finish before managing speech models.");
   }
-  await localWorkerTransport.shutdown();
+  await runWorkerLifecycleOperation(async () => {
+    if (localWorkerTransport && localWorkerTransport.getState().worker !== "stopped") {
+      await localWorkerTransport.shutdown();
+    }
+  });
+}
+
+async function forceResetLocalWorker() {
+  await runWorkerLifecycleOperation(async () => {
+    const transport = localWorkerTransport;
+    if (transport) await transport.shutdown({ force: true });
+    if (localWorkerTransport === transport) {
+      localWorkerTransport = null;
+      localWorkerModelName = null;
+      localWorkerDevice = null;
+    }
+  });
+}
+
+function waitForSessionEnd(transport, timeoutMs = 1500) {
+  if (!transport?.getState().session) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ended) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      transport.off("event", event);
+      transport.off("exit", exit);
+      resolve(ended);
+    };
+    const event = (payload) => {
+      if (
+        payload.type === "stopped"
+        || payload.type === "canceled"
+      ) finish(true);
+    };
+    const exit = () => finish(true);
+    const timeout = setTimeout(() => finish(false), timeoutMs);
+    transport.on("event", event);
+    transport.on("exit", exit);
+    if (!transport.getState().session) finish(true);
+  });
+}
+
+async function recoverFailedDictation() {
+  const transport = localWorkerTransport;
+  let resetWorker = false;
+  if (transport?.getState().session) {
+    await waitForSessionEnd(transport);
+    if (localWorkerTransport === transport && transport.getState().session) {
+      await forceResetLocalWorker();
+      resetWorker = true;
+    }
+  }
+  if (resetWorker && !isQuitting) {
+    ensureLocalWorkerReady().catch((error) => {
+      showStatus("error", error?.message || "Could not restart speech worker", true);
+    });
+  }
 }
 
 function forwardWorkerEvent(event) {
@@ -1074,39 +1311,55 @@ async function ensureLocalWorkerReady(signal, modelName = voiceModelForMode()) {
   if (modelManagementOperation) {
     throw new Error("Wait for the speech model operation to finish.");
   }
-  if (
-    localWorkerTransport
-    && (localWorkerModelName !== modelName || localWorkerDevice !== config.computeDevice)
-  ) {
-    await localWorkerTransport.shutdown();
-    localWorkerTransport = null;
-    localWorkerModelName = null;
-    localWorkerDevice = null;
-  }
-  const transport = createLocalWorkerTransport(modelName);
-  if (transport.getState().worker === "stopped") {
-    await transport.startWorker();
-  }
+  const transport = await runWorkerLifecycleOperation(async () => {
+    if (signal?.aborted) throw new Error("Speech model startup canceled");
+    if (
+      localWorkerTransport
+      && (localWorkerModelName !== modelName || localWorkerDevice !== config.computeDevice)
+    ) {
+      const previousTransport = localWorkerTransport;
+      await previousTransport.shutdown();
+      if (localWorkerTransport === previousTransport) {
+        localWorkerTransport = null;
+        localWorkerModelName = null;
+        localWorkerDevice = null;
+      }
+    }
+    const preparedTransport = createLocalWorkerTransport(modelName);
+    if (preparedTransport.getState().worker === "stopping") {
+      await preparedTransport.shutdown();
+    }
+    if (preparedTransport.getState().worker === "stopped") {
+      await preparedTransport.startWorker();
+    }
+    return preparedTransport;
+  });
+  if (signal?.aborted) throw new Error("Speech model startup canceled");
   const initial = transport.getState();
-  if (initial.model === "ready") {
+  if (initial.worker === "ready" && initial.model === "ready") {
     return initial;
   }
-  if (initial.model === "unavailable") {
+  if (initial.worker === "ready" && initial.model === "unavailable") {
     throw new Error("Speech model is unavailable");
   }
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => cleanup(new Error("Speech model readiness timed out")), 10 * 60 * 1000);
+    const timeout = setTimeout(
+      () => cleanup(new Error("Speech model readiness timed out")),
+      MODEL_READINESS_TIMEOUT_MS,
+    );
     const abort = () => cleanup(new Error("Speech model startup canceled"));
     const model = (event) => {
       if (event.state === "ready") cleanup(null, transport.getState());
       if (event.state === "unavailable") cleanup(new Error(event.message || "Speech model is unavailable"));
     };
     const failure = (error) => cleanup(error instanceof Error ? error : new Error("Transcription worker failed"));
+    const exited = () => cleanup(new Error("Transcription worker stopped before the model became ready"));
     const cleanup = (error, value) => {
       clearTimeout(timeout);
       signal?.removeEventListener("abort", abort);
       transport.off("model", model);
       transport.off("error", failure);
+      transport.off("exit", exited);
       if (error) reject(error); else resolve(value);
     };
     if (signal?.aborted) {
@@ -1116,6 +1369,7 @@ async function ensureLocalWorkerReady(signal, modelName = voiceModelForMode()) {
     signal?.addEventListener("abort", abort, { once: true });
     transport.on("model", model);
     transport.on("error", failure);
+    transport.on("exit", exited);
   });
 }
 
@@ -1123,7 +1377,7 @@ async function startDictation() {
   if (!recorderWindow || recorderWindow.isDestroyed()) {
     return;
   }
-  if (isRecording || isStartingDictation || isCapturingHotkey) {
+  if (isRecording || isStartingDictation || isFinalizingDictation || isCapturingHotkey) {
     return;
   }
 
@@ -1135,14 +1389,23 @@ async function startDictation() {
   showStatus("transcribing", "Starting speech worker...", true);
 
   try {
-    await ensureLocalWorkerReady(startAbortController.signal);
+    await Promise.all([
+      recorderWindowReady,
+      ensureLocalWorkerReady(startAbortController.signal),
+    ]);
     if (cancelStartingDictation) {
       return;
     }
+    dictationForegroundTarget = await captureForegroundTarget();
+    if (cancelStartingDictation) return;
     isRecording = true;
     setTrayMenu();
     showStatus("recording", "Listening...", true);
     recorderWindow.webContents.send("dictation:start", recorderStartConfig());
+  } catch (error) {
+    if (!cancelStartingDictation && !startAbortController.signal.aborted) {
+      showStatus("error", error?.message || "Could not start dictation", true);
+    }
   } finally {
     const wasCancelled = cancelStartingDictation;
     if (dictationStartAbortController === startAbortController) {
@@ -1150,6 +1413,7 @@ async function startDictation() {
     }
     isStartingDictation = false;
     cancelStartingDictation = false;
+    if (!isRecording) dictationForegroundTarget = null;
     setTrayMenu();
     if (wasCancelled && !isRecording) {
       showStatus("ready", `Ready: ${config.hotkey}`);
@@ -1167,12 +1431,16 @@ function stopDictation() {
     return;
   }
   isRecording = false;
+  isFinalizingDictation = true;
   setTrayMenu();
   showStatus("transcribing", "Transcribing...", true);
   recorderWindow.webContents.send("dictation:stop");
 }
 
 function toggleDictation() {
+  if (isFinalizingDictation) {
+    return;
+  }
   if (isRecording || isStartingDictation) {
     stopDictation();
   } else {
@@ -1196,19 +1464,31 @@ function normalizeTranscript(text) {
   return config.appendSpace ? `${clean} ` : clean;
 }
 
-function pasteText(text, insertedMessage = "Inserted dictation") {
+async function pasteText(text, insertedMessage = "Inserted dictation", expectedTarget = dictationForegroundTarget) {
   const normalized = normalizeTranscript(text);
   if (!normalized) {
     showStatus("ready", "No speech detected");
-    return;
+    return Promise.resolve({ status: "empty" });
   }
 
-  const previousClipboardText = clipboard.readText();
-  clipboard.writeText(normalized);
+  let previousClipboard;
+  try {
+    previousClipboard = captureClipboard(clipboard);
+    clipboard.writeText(normalized);
+  } catch {
+    showStatus("error", "Could not copy transcript to the clipboard", true);
+    return Promise.resolve({ status: "clipboard_error" });
+  }
 
   if (!config.autoPaste) {
     showStatus("ready", "Transcript copied to clipboard");
-    return;
+    return Promise.resolve({ status: "copied" });
+  }
+
+  const currentTarget = await captureForegroundTarget();
+  if (!sameForegroundTarget(expectedTarget, currentTarget)) {
+    showStatus("ready", "Transcript copied; focused app changed");
+    return { status: "copied_focus_changed" };
   }
 
   const script = [
@@ -1221,38 +1501,41 @@ function pasteText(text, insertedMessage = "Inserted dictation") {
     stdio: "ignore",
   });
 
-  let finished = false;
-  const restoreClipboard = () => {
-    if (clipboard.readText() === normalized) {
-      clipboard.writeText(previousClipboardText);
-    }
-  };
-  let pasteTimeout;
-  const finishPaste = (message = insertedMessage) => {
-    if (finished) {
-      return;
-    }
-    finished = true;
-    clearTimeout(pasteTimeout);
-    showStatus("ready", message);
-    setTimeout(() => {
-      restoreClipboard();
-    }, 800);
-  };
-
-  pasteProcess.on("error", () => {
-    clearTimeout(pasteTimeout);
-    showStatus("error", "Could not paste; transcript copied");
-    finished = true;
-  });
-  pasteProcess.on("exit", () => finishPaste());
-  pasteTimeout = setTimeout(() => {
-    if (!finished) {
+  return new Promise((resolve) => {
+    let finished = false;
+    let pasteTimeout;
+    const finishFailure = (message, status) => {
+      if (finished) return;
       finished = true;
-      pasteProcess.kill();
-      showStatus("error", "Paste timed out; transcript copied");
-    }
-  }, 2500);
+      clearTimeout(pasteTimeout);
+      showStatus("error", message);
+      resolve({ status });
+    };
+    const finishPaste = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(pasteTimeout);
+      showStatus("ready", insertedMessage);
+      setTimeout(() => {
+        try {
+          if (clipboard.readText() === normalized) restoreClipboard(clipboard, previousClipboard);
+        } catch {}
+        resolve({ status: "pasted" });
+      }, 800);
+    };
+
+    pasteProcess.once("error", () => finishFailure("Could not paste; transcript copied", "paste_error"));
+    pasteProcess.once("exit", (code, signal) => {
+      if (code === 0 && !signal) finishPaste();
+      else finishFailure("Could not paste; transcript copied", "paste_error");
+    });
+    pasteTimeout = setTimeout(() => {
+      if (!finished) {
+        pasteProcess.kill();
+        finishFailure("Paste timed out; transcript copied", "paste_timeout");
+      }
+    }, 2500);
+  });
 }
 
 function fallbackStatusMessage(result) {
@@ -1263,41 +1546,42 @@ function fallbackStatusMessage(result) {
 
 async function completeDictation(text) {
   isRecording = false;
+  isFinalizingDictation = true;
   setTrayMenu();
   const transcript = text || "";
-
-  if (!shouldAttemptRefinement(transcript, config)) {
-    pasteText(transcript);
-    return;
-  }
-
-  if (shouldBlockForRefinement(transcript, config)) {
-    showStatus("transcribing", "Refining text...", true);
-    const result = await refineText(transcript, config);
-    pasteText(result.text, fallbackStatusMessage(result));
-    return;
-  }
-
-  const refinement = refineText(transcript, config);
-  const immediate = await Promise.race([
-    refinement,
-    new Promise((resolve) => setTimeout(() => resolve(null), 75)),
-  ]);
-
-  if (immediate?.status === "refined") {
-    pasteText(immediate.text);
-  } else {
-    pasteText(transcript);
-  }
-
-  refinement.catch(() => {});
-}
-
-function trustedOn(channel, handler) {
-  ipcMain.on(channel, (event, ...args) => {
-    if (!isTrustedFileSender(event)) {
+  try {
+    if (!shouldAttemptRefinement(transcript, config)) {
+      await pasteText(transcript);
       return;
     }
+
+    if (shouldBlockForRefinement(transcript, config)) {
+      showStatus("transcribing", "Refining text...", true);
+      const result = await refineText(transcript, config);
+      await pasteText(result.text, fallbackStatusMessage(result));
+      return;
+    }
+
+    const refinement = refineText(transcript, config);
+    const immediate = await Promise.race([
+      refinement,
+      new Promise((resolve) => setTimeout(() => resolve(null), 75)),
+    ]);
+
+    await pasteText(immediate?.status === "refined" ? immediate.text : transcript);
+    refinement.catch(() => {});
+  } catch {
+    await pasteText(transcript, "LLM unavailable, inserted transcript");
+  } finally {
+    dictationForegroundTarget = null;
+    isFinalizingDictation = false;
+    setTrayMenu();
+  }
+}
+
+function recorderOn(channel, handler) {
+  ipcMain.on(channel, (event, ...args) => {
+    if (!isRecorderSender(event)) return;
     handler(event, ...args);
   });
 }
@@ -1309,21 +1593,50 @@ function trustedHandle(channel, handler) {
   });
 }
 
-trustedOn("dictation:complete", (_event, payload) => {
-  completeDictation(payload?.text || "").catch(() => {
-    pasteText(payload?.text || "", "LLM unavailable, inserted transcript");
-  });
+recorderOn("dictation:complete", (_event, payload) => {
+  if (!isFinalizingDictation || dictationCompletionPromise) return;
+  const transcript = String(payload?.text || "").slice(0, MAX_TRANSCRIPT_CHARS);
+  const completion = completeDictation(transcript);
+  dictationCompletionPromise = completion;
+  completion
+    .catch(() => {
+      dictationForegroundTarget = null;
+      isFinalizingDictation = false;
+      setTrayMenu();
+      showStatus("error", "Could not complete dictation; transcript remains copied", true);
+    })
+    .finally(() => {
+      if (dictationCompletionPromise === completion) dictationCompletionPromise = null;
+    });
 });
 
-trustedOn("dictation:error", (_event, payload) => {
+recorderOn("dictation:error", (_event, payload) => {
+  if (dictationCompletionPromise || (!isRecording && !isFinalizingDictation && !isStartingDictation)) return;
+  const message = String(payload?.message || "Dictation failed").slice(0, 512);
   isRecording = false;
+  isFinalizingDictation = true;
+  dictationForegroundTarget = null;
   setTrayMenu();
-  showStatus("error", payload?.message || "Dictation failed");
+  showStatus("error", message, true);
+  if (!dictationFailureRecovery) {
+    const recovery = recoverFailedDictation();
+    dictationFailureRecovery = recovery;
+    recovery.catch(() => {}).finally(() => {
+      if (dictationFailureRecovery !== recovery) return;
+      dictationFailureRecovery = null;
+      isFinalizingDictation = false;
+      setTrayMenu();
+      showStatus("error", message);
+    });
+  }
 });
 
-trustedOn("dictation:status", (_event, payload) => {
+recorderOn("dictation:status", (_event, payload) => {
   if (payload?.message) {
-    showStatus(payload.state || "ready", payload.message, payload.sticky);
+    const state = ["ready", "recording", "transcribing", "error"].includes(payload.state)
+      ? payload.state
+      : "ready";
+    showStatus(state, String(payload.message).slice(0, 512), Boolean(payload.sticky));
   }
 });
 
@@ -1367,6 +1680,9 @@ trustedHandle("dictation:audio", (event, audio) => {
   if (!(audio instanceof ArrayBuffer)) {
     return { status: "rejected_over_limit", message: "Audio must be an ArrayBuffer" };
   }
+  if (audio.byteLength === 0 || audio.byteLength > MAX_AUDIO_FRAME_BYTES || audio.byteLength % 2 !== 0) {
+    return { status: "rejected_over_limit", message: "Invalid PCM audio frame" };
+  }
   try {
     return localWorkerTransport.sendAudio(Buffer.from(audio))
       ? { status: "accepted" }
@@ -1404,92 +1720,132 @@ trustedHandle("dictation:state:get", (event) => {
   return localWorkerTransport ? localWorkerTransport.getState() : { worker: "stopped", model: "unknown", session: null };
 });
 
-trustedHandle("config:get", (event) => ({
-  config,
-  configPath: configPath(),
-  appVersion: app.getVersion(),
-}));
+trustedHandle("config:get", (event) => {
+  assertSettingsSender(event);
+  return {
+    config,
+    configPath: configPath(),
+    configWarning: configLoadWarning,
+    appVersion: app.getVersion(),
+  };
+});
 
-trustedHandle("hotkey-capture:start", () => {
+trustedHandle("hotkey-capture:start", (event) => {
+  assertPrimarySettingsSender(event);
   isCapturingHotkey = true;
   stopShortcutRegistration();
   return { ok: true };
 });
 
-trustedHandle("hotkey-capture:end", () => {
+trustedHandle("hotkey-capture:end", (event) => {
+  assertPrimarySettingsSender(event);
   return endHotkeyCapture();
 });
 
-trustedHandle("config:save", async (_event, nextConfig) => {
-  const previousConfig = { ...config };
-  const patch = nextConfig && typeof nextConfig === "object" ? nextConfig : {};
-  const next = sanitizeConfig({ ...config, ...patch });
-  const shortcutChanged = next.hotkey !== config.hotkey || next.inputBehavior !== config.inputBehavior;
-  const hotkeySafe = isSafeAccelerator(next.hotkey);
+trustedHandle("config:save", (event, nextConfig) => {
+  assertSettingsSender(event);
+  const patch = validatedConfigPatch(nextConfig);
+  const operation = async () => {
+    const previousConfig = { ...config };
+    const next = sanitizeConfig({ ...config, ...patch });
+    const shortcutChanged = next.hotkey !== config.hotkey || next.inputBehavior !== config.inputBehavior;
+    const hotkeySafe = isSafeAccelerator(next.hotkey);
 
-  config = next;
-  let hotkeyRegistered = hotkeySafe;
-  let restoredHotkeyRegistered = true;
-  if (shortcutChanged) {
-    hotkeyRegistered = hotkeySafe ? await applyShortcutRegistration() : false;
-    if (!hotkeyRegistered) {
-      config = previousConfig;
-      restoredHotkeyRegistered = await applyShortcutRegistration();
+    config = next;
+    let hotkeyRegistered = shortcutRegistrationActive && hotkeySafe;
+    let restoredHotkeyRegistered = shortcutRegistrationActive;
+    if (shortcutChanged) {
+      if (isRecording || isStartingDictation || isFinalizingDictation) {
+        hotkeyRegistered = false;
+      } else {
+        hotkeyRegistered = hotkeySafe ? await applyShortcutRegistration() : false;
+      }
+      if (!hotkeyRegistered) {
+        config = {
+          ...next,
+          hotkey: previousConfig.hotkey,
+          inputBehavior: previousConfig.inputBehavior,
+        };
+        restoredHotkeyRegistered = await applyShortcutRegistration();
+      }
     }
-  }
 
-  saveConfig();
-  preloadConfiguredLlmInBackground(config);
-  notifyConfigUpdated();
-  setTrayMenu();
-  const selectedVoiceModelChanged = (
-    next.fastVoiceModel !== previousConfig.fastVoiceModel
-    || next.accurateVoiceModel !== previousConfig.accurateVoiceModel
-    || next.mode !== previousConfig.mode
-    || next.computeDevice !== previousConfig.computeDevice
-  );
-  if (selectedVoiceModelChanged && !isRecording && !isStartingDictation) {
-    ensureLocalWorkerReady(undefined, voiceModelForMode()).catch((error) => {
-      showStatus("error", error?.message || "Could not start selected speech model", true);
-    });
-  }
-  showStatus(
-    hotkeyRegistered ? "ready" : "error",
-    hotkeyRegistered
-      ? "Settings saved"
-      : restoredHotkeyRegistered
-        ? "Hotkey unavailable; previous shortcut restored"
-        : "Could not register a hotkey",
-    !hotkeyRegistered,
-  );
+    try {
+      saveConfig();
+    } catch (error) {
+      config = previousConfig;
+      if (shortcutChanged) await applyShortcutRegistration().catch(() => false);
+      throw error;
+    }
+    preloadConfiguredLlmInBackground(config);
+    notifyConfigUpdated();
+    setTrayMenu();
+    const selectedVoiceModelChanged = (
+      config.fastVoiceModel !== previousConfig.fastVoiceModel
+      || config.accurateVoiceModel !== previousConfig.accurateVoiceModel
+      || config.mode !== previousConfig.mode
+      || config.computeDevice !== previousConfig.computeDevice
+    );
+    if (selectedVoiceModelChanged && !isRecording && !isStartingDictation && !isFinalizingDictation) {
+      ensureLocalWorkerReady(undefined, voiceModelForMode()).catch((error) => {
+        showStatus("error", error?.message || "Could not start selected speech model", true);
+      });
+    }
+    showStatus(
+      hotkeyRegistered ? "ready" : "error",
+      hotkeyRegistered
+        ? "Settings saved"
+        : restoredHotkeyRegistered
+          ? "Hotkey unavailable; previous shortcut restored"
+          : "Could not register a hotkey",
+      !hotkeyRegistered,
+    );
 
-  return {
-    config,
-    configPath: configPath(),
-    hotkeyRegistered,
-    restoredHotkeyRegistered,
+    return {
+      config,
+      configPath: configPath(),
+      hotkeyRegistered,
+      restoredHotkeyRegistered,
+    };
   };
+  const result = configSaveQueue.then(operation, operation);
+  configSaveQueue = result.then(() => undefined, () => undefined);
+  return result;
 });
 
-trustedHandle("ollama:models", async (_event, baseUrl) => {
-  const url = sanitizeHttpServiceUrl(baseUrl, config.ollamaServerUrl, config.allowRemoteLlm);
+trustedHandle("ollama:models", async (event, baseUrl) => {
+  assertAdvancedSettingsSender(event);
+  const url = sanitizeHttpServiceUrl(String(baseUrl || "").slice(0, 2048), config.ollamaServerUrl, config.allowRemoteLlm);
   return listOllamaModels(url);
 });
 
-trustedHandle("llm:preload", async (_event, nextConfig) => {
+trustedHandle("llm:preload", async (event, nextConfig) => {
+  assertAdvancedSettingsSender(event);
+  const patch = validatedConfigPatch(nextConfig);
   const preloadConfig = sanitizeConfig({
     ...config,
-    ...nextConfig,
-    llmEnabled: Boolean(nextConfig?.llmEnabled),
+    ...patch,
+    llmEnabled: Boolean(patch.llmEnabled),
   });
   return preloadConfiguredLlm(preloadConfig, { force: true });
 });
 
-trustedHandle("speech-model:status", async (_event, modelName) => (
-  runSpeechModelManager("status", { includeRemote: true, modelName: requestedVoiceModel(modelName) })
-));
+trustedHandle("dictation:reset", async (event) => {
+  assertRecorderSender(event);
+  await forceResetLocalWorker();
+  ensureLocalWorkerReady().catch((error) => {
+    showStatus("error", error?.message || "Could not restart speech worker", true);
+  });
+  return { status: "accepted" };
+});
 
-trustedHandle("speech-model:download", async (_event, modelName) => {
+trustedHandle("speech-model:status", async (event, modelName) => {
+  assertAdvancedSettingsSender(event);
+  return runSpeechModelManager("status", { includeRemote: true, modelName: requestedVoiceModel(modelName) });
+});
+
+trustedHandle("speech-model:download", async (event, modelName) => {
+  assertAdvancedSettingsSender(event);
   const selectedModel = requestedVoiceModel(modelName);
   await stopWorkerForSpeechModelOperation();
   const result = await runSpeechModelManager("download", { exclusive: true, modelName: selectedModel });
@@ -1501,22 +1857,26 @@ trustedHandle("speech-model:download", async (_event, modelName) => {
   }
 });
 
-trustedHandle("speech-model:delete", async (_event, modelName) => {
+trustedHandle("speech-model:delete", async (event, modelName) => {
+  assertAdvancedSettingsSender(event);
   await stopWorkerForSpeechModelOperation();
   return runSpeechModelManager("delete", { exclusive: true, modelName: requestedVoiceModel(modelName) });
 });
 
-trustedHandle("advanced-settings:open", () => {
+trustedHandle("advanced-settings:open", (event) => {
+  assertPrimarySettingsSender(event);
   openAdvancedSettingsWindow();
   return { ok: true };
 });
 
-trustedHandle("app-status:get", async () => {
+trustedHandle("app-status:get", async (event) => {
+  assertPrimarySettingsSender(event);
   const worker = localWorkerTransport?.getState();
   const status = { ok: worker?.worker === "ready" && worker?.model === "ready", state: worker?.model || "stopped", message: "Local worker" };
   return {
     isRecording,
     isStartingDictation,
+    isFinalizingDictation,
     worker,
     activeVoiceModel: localWorkerModelName,
     activeComputeDevice: localWorkerDevice,
@@ -1529,14 +1889,23 @@ trustedHandle("app-status:get", async () => {
   };
 });
 
-trustedHandle("settings-window:fit", (_event, size) => fitSettingsWindowToContent(size));
+trustedHandle("settings-window:fit", (event, size) => {
+  assertPrimarySettingsSender(event);
+  const requestedSize = size && typeof size === "object" ? size : {};
+  return fitSettingsWindowToContent(requestedSize);
+});
 
-app.whenReady().then(async () => {
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    app.whenReady().then(openSettingsWindow).catch(() => {});
+  });
+
+  app.whenReady().then(async () => {
   loadConfig();
-  saveConfig();
+  if (shouldPersistLoadedConfig) saveConfig();
   Menu.setApplicationMenu(null);
-
-  app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
   createRecorderWindow();
   createStatusWindow();
@@ -1556,24 +1925,38 @@ app.whenReady().then(async () => {
     showStatus("error", error?.message || "Could not start speech worker", true);
   });
   preloadConfiguredLlmInBackground(config);
-  if (hotkeyRegistered) {
+  if (configLoadWarning) {
+    showStatus("error", configLoadWarning, true);
+  } else if (hotkeyRegistered) {
     showStatus("ready", `Ready: ${config.hotkey}`);
   }
-});
+  }).catch((error) => {
+    console.error("Application startup failed:", error);
+    app.quit();
+  });
+}
 
 app.on("window-all-closed", () => {});
 
 app.on("will-quit", () => {
   stopShortcutRegistration();
-  if (localWorkerTransport) {
-    // Electron cannot await will-quit handlers, but an orderly shutdown is
-    // attempted first and the supervisor enforces its timeout.
-    localWorkerTransport.shutdown().catch(() => {});
-  }
 });
 
-app.on("before-quit", () => {
+app.on("before-quit", (event) => {
   isQuitting = true;
+  stopShortcutRegistration();
+  if (shutdownComplete) return;
+  event.preventDefault();
+  if (quitShutdownPromise) return;
+  quitShutdownPromise = Promise.all([
+    localWorkerTransport ? localWorkerTransport.shutdown() : Promise.resolve(),
+    stopModelManagementProcesses(),
+  ])
+    .catch(() => {})
+    .finally(() => {
+      shutdownComplete = true;
+      app.quit();
+    });
 });
 
 app.on("activate", () => {

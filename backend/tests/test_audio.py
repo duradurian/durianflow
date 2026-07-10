@@ -31,8 +31,13 @@ def test_trim_or_pad() -> None:
     audio = np.ones(5, dtype=np.float32)
     assert len(trim_or_pad(audio, 10, 1)) == 10
     assert len(trim_or_pad(np.ones(20, dtype=np.float32), 10, 1)) == 10
+    assert len(trim_or_pad(audio, 10, 0)) == 0
 
 
 def test_sample_time_helpers() -> None:
     assert seconds_to_samples(0.5, 16000) == 8000
     assert samples_to_seconds(8000, 16000) == 0.5
+    with pytest.raises(ValueError, match="sample_rate"):
+        seconds_to_samples(1, 0)
+    with pytest.raises(ValueError, match="finite"):
+        seconds_to_samples(float("inf"), 16000)
