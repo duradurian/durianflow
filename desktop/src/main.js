@@ -5,6 +5,8 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { captureClipboard, restoreClipboard } = require("./clipboard_snapshot");
+const { ClipboardRestoreScheduler } = require("./clipboard_restore_scheduler");
+const { desktopWorkerEnvironment } = require("./desktop_latency_policy");
 const { loadJsonConfig, writeJsonAtomic } = require("./config_store");
 const { PRODUCT_NAME, SETTINGS_TITLE, ADVANCED_SETTINGS_TITLE } = require("./product_identity");
 const {
@@ -21,6 +23,11 @@ const {
 } = require("./text_processor");
 const { sanitizeHttpServiceUrl } = require("./url_policy");
 const { createDictationTransport } = require("./dictation_transport");
+const {
+  WindowsPasteHelper,
+  shouldUseColdPaste,
+  validTarget,
+} = require("./windows_paste_helper");
 const {
   assertTrustedFileSender,
   installPermissionPolicy,
@@ -69,7 +76,6 @@ const MAX_AUDIO_FRAME_BYTES = 64 * 1024;
 const MAX_TRANSCRIPT_CHARS = 100_000;
 const MODEL_READINESS_TIMEOUT_MS = 60 * 60 * 1000;
 const MODEL_DOWNLOAD_TIMEOUT_MS = 6 * 60 * 60 * 1000;
-
 let config = { ...DEFAULT_CONFIG };
 let configLoadWarning = "";
 let shouldPersistLoadedConfig = true;
@@ -102,6 +108,11 @@ let quitShutdownPromise = null;
 let shutdownComplete = false;
 let dictationFailureRecovery = null;
 let dictationCompletionPromise = null;
+const clipboardRestorer = new ClipboardRestoreScheduler({
+  clipboard,
+  restoreSnapshot: restoreClipboard,
+});
+const windowsPasteHelper = new WindowsPasteHelper();
 
 const rootDir = path.resolve(__dirname, "..", "..");
 const backendDir = path.join(rootDir, "backend");
@@ -909,19 +920,29 @@ async function appMemoryStatus() {
     electronBytes = process.memoryUsage().rss;
   }
 
-  const workerPid = localWorkerTransport?.supervisor?.child?.pid;
-  let workerBytes = 0;
-  if (Number.isInteger(workerPid) && workerPid > 0 && process.platform === "win32") {
+  const childPids = [
+    localWorkerTransport?.supervisor?.child?.pid,
+    windowsPasteHelper.child?.pid,
+  ].filter((pid, index, values) => (
+    Number.isInteger(pid) && pid > 0 && values.indexOf(pid) === index
+  ));
+  let childBytes = 0;
+  if (childPids.length && process.platform === "win32") {
+    const processIds = childPids.join(",");
     const output = await execFileText(
       "powershell.exe",
-      ["-NoProfile", "-Command", `(Get-Process -Id ${workerPid}).WorkingSet64`],
+      [
+        "-NoProfile",
+        "-Command",
+        `$sum = 0; @(${processIds}) | ForEach-Object { $item = Get-Process -Id $_ -ErrorAction SilentlyContinue; if ($item) { $sum += $item.WorkingSet64 } }; $sum`,
+      ],
       1200,
     );
     const parsed = Number(String(output || "").trim());
-    if (Number.isFinite(parsed) && parsed > 0) workerBytes = parsed;
+    if (Number.isFinite(parsed) && parsed > 0) childBytes = parsed;
   }
 
-  const used = electronBytes + workerBytes;
+  const used = electronBytes + childBytes;
   const total = os.totalmem();
   return {
     ok: Number.isFinite(used) && used > 0 && Number.isFinite(total) && total > 0,
@@ -999,7 +1020,7 @@ function validatedConfigPatch(value) {
   return patch;
 }
 
-async function captureForegroundTarget() {
+async function captureForegroundTargetCold() {
   if (process.platform !== "win32") return null;
   const script = [
     "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class OpenflowForeground { [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow(); [DllImport(\"user32.dll\")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId); }'",
@@ -1017,8 +1038,57 @@ async function captureForegroundTarget() {
   return match ? { window: match[1], processId: match[2] } : null;
 }
 
-function sameForegroundTarget(left, right) {
-  return Boolean(left && right && left.window === right.window && left.processId === right.processId);
+async function captureForegroundTarget() {
+  if (process.platform !== "win32") return null;
+  const warmTarget = await windowsPasteHelper.captureForeground();
+  return warmTarget || captureForegroundTargetCold();
+}
+
+function pasteWithColdPowerShell(expectedTarget) {
+  if (process.platform !== "win32" || !validTarget(expectedTarget)) {
+    return Promise.resolve({ status: "focus_changed" });
+  }
+
+  const script = [
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class DurianflowPasteTarget { [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow(); [DllImport(\"user32.dll\")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId); }'",
+    "$window = [DurianflowPasteTarget]::GetForegroundWindow()",
+    "$foregroundProcessId = 0",
+    "[void][DurianflowPasteTarget]::GetWindowThreadProcessId($window, [ref]$foregroundProcessId)",
+    `if ($window.ToInt64().ToString() -ne '${expectedTarget.window}' -or $foregroundProcessId.ToString() -ne '${expectedTarget.processId}') { exit 20 }`,
+    "[System.Windows.Forms.SendKeys]::SendWait('^v')",
+  ].join("; ");
+
+  let pasteProcess;
+  try {
+    pasteProcess = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script], {
+      windowsHide: true,
+      stdio: "ignore",
+    });
+  } catch {
+    return Promise.resolve({ status: "paste_error" });
+  }
+
+  return new Promise((resolve) => {
+    let finished = false;
+    let timeout;
+    const finish = (status) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      resolve({ status });
+    };
+    pasteProcess.once("error", () => finish("paste_error"));
+    pasteProcess.once("exit", (code, signal) => {
+      if (code === 0 && !signal) finish("pasted");
+      else if (code === 20 && !signal) finish("focus_changed");
+      else finish("paste_error");
+    });
+    timeout = setTimeout(() => {
+      try { pasteProcess.kill(); } catch {}
+      finish("paste_timeout");
+    }, 2500);
+  });
 }
 
 function requestedVoiceModel(value) {
@@ -1038,7 +1108,7 @@ function workerLaunchOptions(modelName = voiceModelForMode()) {
     cwd: backendDir,
     // The worker has the same trust boundary as the desktop process and needs
     // the user's CUDA, certificate, proxy, home and temporary-directory setup.
-    env: {
+    env: desktopWorkerEnvironment({
       ...process.env,
       PATH: process.env.PATH || "",
       PYTHONUNBUFFERED: "1",
@@ -1052,7 +1122,7 @@ function workerLaunchOptions(modelName = voiceModelForMode()) {
       // Device selection is explicit: CUDA failures must surface instead of
       // silently retaining a second CPU copy of the model weights.
       FALLBACK_TO_CPU_ON_CUDA_ERROR: "false",
-    },
+    }),
   };
 }
 
@@ -1432,9 +1502,11 @@ function stopDictation() {
   }
   isRecording = false;
   isFinalizingDictation = true;
+  // Fence audio and begin final transcription before doing synchronous tray
+  // and status-window work on the main thread.
+  recorderWindow.webContents.send("dictation:stop");
   setTrayMenu();
   showStatus("transcribing", "Transcribing...", true);
-  recorderWindow.webContents.send("dictation:stop");
 }
 
 function toggleDictation() {
@@ -1473,6 +1545,9 @@ async function pasteText(text, insertedMessage = "Inserted dictation", expectedT
 
   let previousClipboard;
   try {
+    // Complete an earlier delayed restore before snapshotting the clipboard for
+    // a rapid follow-up dictation.
+    clipboardRestorer.flush();
     previousClipboard = captureClipboard(clipboard);
     clipboard.writeText(normalized);
   } catch {
@@ -1485,57 +1560,30 @@ async function pasteText(text, insertedMessage = "Inserted dictation", expectedT
     return Promise.resolve({ status: "copied" });
   }
 
-  const currentTarget = await captureForegroundTarget();
-  if (!sameForegroundTarget(expectedTarget, currentTarget)) {
+  let pasteResult = await windowsPasteHelper.pasteIfFocused(expectedTarget);
+  if (shouldUseColdPaste(pasteResult)) {
+    // PowerShell may be restricted or may have exited before the request was
+    // dispatched. The one-shot fallback still performs the focus check and
+    // SendKeys call atomically in a single process.
+    pasteResult = await pasteWithColdPowerShell(expectedTarget);
+  }
+
+  if (pasteResult?.status === "focus_changed") {
     showStatus("ready", "Transcript copied; focused app changed");
     return { status: "copied_focus_changed" };
   }
 
-  const script = [
-    "Add-Type -AssemblyName System.Windows.Forms",
-    "[System.Windows.Forms.SendKeys]::SendWait('^v')",
-  ].join("; ");
+  if (pasteResult?.status === "pasted") {
+    showStatus("ready", insertedMessage);
+    clipboardRestorer.schedule(normalized, previousClipboard);
+    return { status: "pasted" };
+  }
 
-  const pasteProcess = spawn("powershell.exe", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", script], {
-    windowsHide: true,
-    stdio: "ignore",
-  });
-
-  return new Promise((resolve) => {
-    let finished = false;
-    let pasteTimeout;
-    const finishFailure = (message, status) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(pasteTimeout);
-      showStatus("error", message);
-      resolve({ status });
-    };
-    const finishPaste = () => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(pasteTimeout);
-      showStatus("ready", insertedMessage);
-      setTimeout(() => {
-        try {
-          if (clipboard.readText() === normalized) restoreClipboard(clipboard, previousClipboard);
-        } catch {}
-        resolve({ status: "pasted" });
-      }, 800);
-    };
-
-    pasteProcess.once("error", () => finishFailure("Could not paste; transcript copied", "paste_error"));
-    pasteProcess.once("exit", (code, signal) => {
-      if (code === 0 && !signal) finishPaste();
-      else finishFailure("Could not paste; transcript copied", "paste_error");
-    });
-    pasteTimeout = setTimeout(() => {
-      if (!finished) {
-        pasteProcess.kill();
-        finishFailure("Paste timed out; transcript copied", "paste_timeout");
-      }
-    }, 2500);
-  });
+  const uncertain = pasteResult?.status === "unknown" || pasteResult?.status === "paste_timeout";
+  showStatus("error", uncertain
+    ? "Could not confirm paste; transcript copied"
+    : "Could not paste; transcript copied");
+  return { status: pasteResult?.status || "paste_error" };
 }
 
 function fallbackStatusMessage(result) {
@@ -1906,6 +1954,9 @@ if (!hasSingleInstanceLock) {
   loadConfig();
   if (shouldPersistLoadedConfig) saveConfig();
   Menu.setApplicationMenu(null);
+  // Load WinForms and user32 interop before the first dictation so completion
+  // only pays for a tiny stdin/stdout round trip.
+  windowsPasteHelper.start().catch(() => {});
 
   createRecorderWindow();
   createStatusWindow();
@@ -1945,12 +1996,14 @@ app.on("will-quit", () => {
 app.on("before-quit", (event) => {
   isQuitting = true;
   stopShortcutRegistration();
+  clipboardRestorer.flush();
   if (shutdownComplete) return;
   event.preventDefault();
   if (quitShutdownPromise) return;
   quitShutdownPromise = Promise.all([
     localWorkerTransport ? localWorkerTransport.shutdown() : Promise.resolve(),
     stopModelManagementProcesses(),
+    windowsPasteHelper.stop(),
   ])
     .catch(() => {})
     .finally(() => {

@@ -10,6 +10,12 @@ npm start
 Electron starts `backend/scripts/run_worker.py` as a supervised local child
 process. The recorder captures mono 16 kHz PCM16 audio and uses a narrow
 contextBridge IPC API; it does not connect to a network transcription service.
+Because the recorder is hidden, desktop sessions skip rolling partial
+transcriptions and run only the finalized utterance passes used for paste. This
+keeps queued speculative inference off the stop-to-paste path.
+On Windows, foreground validation and `Ctrl+V` run through a prewarmed helper
+that checks the target immediately before paste, avoiding per-dictation process
+startup while retaining the focused-app safety check.
 
 The main settings cover hotkey, microphone, language, transcription mode, and
 paste behavior. Advanced settings configure optional local LLM refinement
