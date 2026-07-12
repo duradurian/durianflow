@@ -5,7 +5,8 @@ import numpy as np
 import pytest
 
 from app.config import Settings
-from app.transcriber import WhisperTranscriber
+from app.backends import BackendCapability
+from app.transcriber import WhisperTranscriber, create_transcriber
 
 
 def test_cuda_load_can_fallback_to_cpu(monkeypatch, tmp_path) -> None:
@@ -152,3 +153,44 @@ def test_transcribe_rejects_incompatible_audio_before_loading_model() -> None:
         transcriber.transcribe(np.array([np.nan], dtype=np.float32), 16000, "en", "fast")
 
     assert not transcriber.model_loaded
+
+
+def test_factory_preserves_explicit_direct_cuda_fallback_policy() -> None:
+    capabilities = (
+        BackendCapability("mlx", False, "metal", "float16", "not a Mac"),
+        BackendCapability("cuda", True, "cuda", "float16"),
+        BackendCapability("cpu", True, "cpu", "int8"),
+    )
+    transcriber = create_transcriber(
+        Settings(
+            _env_file=None,
+            DEVICE="cuda",
+            FALLBACK_TO_CPU_ON_CUDA_ERROR=True,
+        ),
+        capabilities,
+    )
+
+    assert isinstance(transcriber, WhisperTranscriber)
+    assert transcriber.settings.FALLBACK_TO_CPU_ON_CUDA_ERROR is True
+
+
+def test_factory_uses_cpu_when_direct_cuda_probe_is_unavailable_and_fallback_enabled() -> None:
+    capabilities = (
+        BackendCapability("mlx", False, "metal", "float16", "not a Mac"),
+        BackendCapability("cuda", False, "cuda", "float16", "no CUDA device"),
+        BackendCapability("cpu", True, "cpu", "int8"),
+    )
+    transcriber = create_transcriber(
+        Settings(
+            _env_file=None,
+            DEVICE="cuda",
+            COMPUTE_TYPE="float16",
+            FALLBACK_TO_CPU_ON_CUDA_ERROR=True,
+        ),
+        capabilities,
+    )
+
+    assert isinstance(transcriber, WhisperTranscriber)
+    assert transcriber.requested_backend == "cuda"
+    assert transcriber.active_backend == "cpu"
+    assert transcriber.active_compute_type == "int8"

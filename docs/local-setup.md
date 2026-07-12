@@ -1,8 +1,24 @@
-# Local Setup
+# Local setup
 
-## Desktop development path
+The Electron app starts a supervised Python worker over stdio. It does not open a transcription server or port.
+Use Python 3.11+ and Node.js 22.12+ for the current dependency set.
 
-The desktop application starts a local Python worker directly; it does not use a network service or port 8000.
+## macOS and other POSIX systems
+
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+cp .env.example .env
+
+cd ../desktop
+npm install
+npm start
+```
+
+## Windows PowerShell
 
 ```powershell
 cd backend
@@ -11,35 +27,25 @@ python -m venv .venv
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
-python scripts/install_model.py large-v3-turbo
 
 cd ..\desktop
 npm install
 npm start
 ```
 
-The desktop app resolves `backend/.venv/Scripts/python.exe` by default. Set `DURIANFLOW_PYTHON` to an explicit interpreter path only when that default is unsuitable. `OPENFLOW_PYTHON` remains a compatibility alias.
+The launcher checks `.venv/bin/python` on POSIX and `.venv/Scripts/python.exe` on Windows. Set `DURIANFLOW_PYTHON` to override it; `OPENFLOW_PYTHON` remains a compatibility alias.
 
-Press `Ctrl+Alt+Space` to start dictation, then press it again to stop, finalize, and paste the transcript into the focused textbox.
+## Models and devices
 
-## Model and device configuration
+`DEVICE=auto` is the default. It prefers MLX/Metal, then CUDA, then CPU. The desktop Advanced Settings view shows capability results reported by the worker.
 
-With `ALLOW_MODEL_DOWNLOAD=true`, worker startup can download/cache the selected model. For offline startup, install a model explicitly with `scripts/install_model.py`, or set `MODEL_PATH` and set `ALLOW_MODEL_DOWNLOAD=false`.
+Preinstall a model for the selected backend:
 
-The Electron desktop owns its worker's model, device, compute type, and CUDA fallback policy. It defaults to **CPU**; choose **NVIDIA GPU (CUDA)** in **Advanced Settings > Speech Model** after installing its runtime dependencies. The following `.env` settings apply when launching `scripts/run_worker.py` or backend utilities directly.
-
-Direct-worker CPU configuration in `backend/.env`:
-
-```env
-DEVICE=cpu
-COMPUTE_TYPE=int8
+```bash
+cd backend
+python scripts/install_model.py large-v3-turbo --backend auto
 ```
 
-Direct-worker NVIDIA configuration:
+For fully offline startup, install every backend format Automatic mode may need, then set `ALLOW_MODEL_DOWNLOAD=false`.
 
-```env
-DEVICE=cuda
-COMPUTE_TYPE=float16
-```
-
-See [nvidia-gpu.md](nvidia-gpu.md) for native Windows GPU setup.
+See [compute-backends.md](compute-backends.md), [macos.md](macos.md), and [nvidia-gpu.md](nvidia-gpu.md).

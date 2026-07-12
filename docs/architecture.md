@@ -4,7 +4,7 @@ This is the end-to-end map of the desktop dictation path, Python sidecar, model 
 
 ```mermaid
 flowchart TB
-  User["User and focused Windows text field"]
+  User["User and focused macOS/Windows text field"]
 
   subgraph Provision["Provisioning, configuration, and checks"]
     direction LR
@@ -12,7 +12,7 @@ flowchart TB
     DesktopConfig["Electron userData/config.json<br/>hotkey, mic, language, mode, paste, LLM"]
     BackendEnv["backend/.env<br/>model, device, VAD, buffers, concurrency"]
     InstallModel["install_model.py<br/>download, validate, atomically install"]
-    ModelCache[("MODEL_PATH or models cache<br/>model.bin + config.json")]
+    ModelCache[("Backend-qualified model cache<br/>MLX or CTranslate2 weights")]
     FileCli["transcribe_file.py<br/>read, mono, resample"]
     Benchmark["benchmark_models.py<br/>silent sample + timing"]
     ProtocolDoc["protocol.md"]
@@ -38,7 +38,7 @@ flowchart TB
     TextProcessor["text_processor.js<br/>prompt, timeout, output validation"]
     LocalLlm["llama.cpp or Ollama service<br/>localhost by default; remote opt-in"]
     Clipboard["Clipboard write<br/>preserve copied transcript on failure"]
-    Paste["Hidden PowerShell Ctrl+V<br/>when autoPaste is enabled"]
+    Paste["Focus-validated Command-V / Ctrl-V<br/>when autoPaste is enabled"]
   end
 
   subgraph Worker["Supervised local Python transcription sidecar"]
@@ -46,10 +46,10 @@ flowchart TB
     RunWorker["scripts/run_worker.py"]
     Framing["worker_protocol.py<br/>protocol v1, 4-byte length-prefixed UTF-8 JSON,<br/>bounded records and base64 PCM"]
     WorkerLoop["worker.py: TranscriptionWorker<br/>async model load, active session, cancellation, credits"]
-    ModelLoad["transcriber.py + cuda_runtime.py<br/>load faster-whisper; CUDA float16 or CPU int8 fallback"]
+    ModelLoad["backends.py + transcriber.py<br/>auto: MLX Metal, CUDA, then CPU"]
     ResolveModel{"model_store.py<br/>valid MODEL_PATH / cache / download allowed?"}
     Unavailable["model_state: unavailable"]
-    Whisper["faster-whisper / CTranslate2 model"]
+    Whisper["MLX Whisper or faster-whisper / CTranslate2 model"]
     Session["session.py<br/>bounded PCM buffers, session metrics,<br/>rolling partial and final triggers"]
     Pcm["audio.py<br/>PCM16 bytes to float32"]
     Vad["vad.py<br/>energy VAD: speech start/end + trailing pad"]

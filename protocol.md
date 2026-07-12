@@ -13,4 +13,23 @@ The worker emits `worker_ready`, `model_state`, `accepted`, `ready`, `status`,
 `partial`, `final`, `stopped`, `canceled`, `error`, and `shutdown_ack` records.
 `accepted.creditBytes` provides the sender's audio-flow-control budget.
 
+Model lifecycle records can also include additive runtime metadata:
+
+```json
+{
+  "protocolVersion": 1,
+  "type": "model_state",
+  "state": "ready",
+  "requestedBackend": "auto",
+  "backend": "mlx",
+  "device": "metal",
+  "computeType": "float16",
+  "availableBackends": ["mlx", "cpu"],
+  "capabilities": []
+}
+```
+
+These fields do not change protocol version `1`; consumers ignore unknown event
+fields.
+
 The local worker has no HTTP endpoint or network listener.

@@ -1,7 +1,7 @@
 [project]
 name = "durianflow-backend"
 version = "0.1.0"
-description = "Self-hosted faster-whisper backend for Durianflow dictation."
+description = "Cross-platform MLX and faster-whisper backend for Durianflow dictation."
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.13.3,<3",
@@ -10,6 +10,8 @@ dependencies = [
     "scipy>=1.17.1,<2",
     "soundfile>=0.13.1,<1",
     "faster-whisper>=1.2.1,<2",
+    "huggingface-hub>=0.34,<2",
+    "mlx-whisper==0.4.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "idna>=3.15,<4",
     "python-dotenv>=1.2.2,<2",
 ]

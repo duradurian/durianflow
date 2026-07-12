@@ -1,39 +1,32 @@
 # Durianflow Desktop
 
-Run the Electron client from this directory:
+The Electron tray client is supported for source development on macOS and Windows.
+Use Node.js 22.12 or newer and a Python 3.11+ backend environment.
 
-```powershell
+```bash
 npm install
 npm start
 ```
 
-Electron starts `backend/scripts/run_worker.py` as a supervised local child
-process. The recorder captures mono 16 kHz PCM16 audio and uses a narrow
-contextBridge IPC API; it does not connect to a network transcription service.
-Because the recorder is hidden, desktop sessions skip rolling partial
-transcriptions and run only the finalized utterance passes used for paste. This
-keeps queued speculative inference off the stop-to-paste path.
-On Windows, foreground validation and `Ctrl+V` run through a prewarmed helper
-that checks the target immediately before paste, avoiding per-dictation process
-startup while retaining the focused-app safety check.
+It launches `backend/scripts/run_worker.py` as a supervised stdio child, captures mono 16 kHz PCM16 audio, and exposes only fixed IPC calls through the context bridge.
 
-The main settings cover hotkey, microphone, language, transcription mode, and
-paste behavior. Advanced settings configure optional local LLM refinement
-through llama.cpp or Ollama and manage faster-whisper model profiles. Configure
-separate Fast and Accurate models, download either profile, and switch profiles
-without sharing renderer access to the model files. A downloaded profile starts
-in the worker immediately for validation and warm-up.
+Interpreter discovery is platform-aware:
 
-The speech-model panel shows installed size, storage path, free disk space, and
-live download bytes, speed, elapsed time, and total size when the model host
-supplies metadata. The app removes stale incomplete model downloads before it
-starts the worker. It can delete managed model downloads; it does not delete an
-external `MODEL_PATH`.
+- macOS/Linux: `backend/.venv/bin/python`, then `python3`.
+- Windows: `backend/.venv/Scripts/python.exe`, then `python`.
+- Override: `DURIANFLOW_PYTHON`.
 
-The first-run default is **CPU**; choose **NVIDIA GPU (CUDA)** after installing
-its runtime dependencies. The selected device in the Speech Model panel
-device restarts the local worker; CPU uses int8 inference and changes the main
-Settings resource meter from GPU memory to combined app and worker RAM.
+Advanced Settings defaults to Automatic inference, which prefers Apple MLX/Metal, then NVIDIA CUDA, then CPU. Managed model actions use the resolved engine’s model format.
 
-Run `npm run check` to syntax-check desktop source files and `npm test` for the
-desktop unit tests.
+On macOS, auto-paste captures and revalidates the frontmost process plus Core Graphics window before sending Command-V. Accessibility or Automation denial, focus changes, and ambiguous completion leave the transcript copied and are never retried. Windows retains the warmed PowerShell/user32 helper and atomic Ctrl-V focus check.
+
+Toggle shortcuts work across platforms. Hold-to-speak remains Windows-only. MLX resource status is reported as unified memory; CUDA uses NVIDIA VRAM.
+
+Run checks with:
+
+```bash
+npm run check
+npm test
+```
+
+See [the macOS guide](../docs/macos.md) and [compute backend guide](../docs/compute-backends.md).

@@ -8,7 +8,7 @@
     <style>
       :root {
         color-scheme: light dark;
-        font-family: "Segoe UI", system-ui, sans-serif;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
         --bg: #f3f6fa;
         --surface: #ffffff;
         --surface-muted: #f8fafc;
@@ -484,7 +484,7 @@
       <section class="memory-grid" aria-label="Memory usage">
         <div id="gpu-memory-card" class="memory-card">
           <div class="memory-row">
-            <div id="memory-label" class="memory-label">GPU Memory</div>
+            <div id="memory-label" class="memory-label">App RAM</div>
             <div id="gpu-memory-value" class="memory-value">Checking</div>
           </div>
           <div class="memory-meter" aria-hidden="true"><span id="gpu-memory-meter"></span></div>
@@ -546,7 +546,7 @@
                     <span>Hold</span>
                   </label>
                 </div>
-                <div class="helper">Toggle starts and stops with each press. Hold records only while the hotkey is held.</div>
+                <div class="helper">Toggle starts and stops with each press. Hold-to-speak currently requires Windows.</div>
               </div>
 
               <label class="wide">
@@ -633,6 +633,7 @@
       </form>
     </main>
 
+    <script src="./hotkey_capture.js"></script>
     <script src="./settings.js"></script>
   </body>
 </html>

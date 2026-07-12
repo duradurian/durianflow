@@ -18,6 +18,7 @@ const gpuMemoryCard = document.getElementById("gpu-memory-card");
 const memoryLabel = document.getElementById("memory-label");
 const gpuMemoryValue = document.getElementById("gpu-memory-value");
 const gpuMemoryMeter = document.getElementById("gpu-memory-meter");
+const { acceleratorFromEvent } = window.DurianflowHotkeyCapture;
 
 const fields = {
   language: document.getElementById("language"),
@@ -48,6 +49,8 @@ let isSaving = false;
 let saveQueuedDuringRequest = false;
 let formRevision = 0;
 let micTestGeneration = 0;
+let appStatusGeneration = 0;
+let hostPlatform = "";
 
 function requestWindowFit() {
   clearTimeout(resizeTimer);
@@ -112,14 +115,15 @@ function setMemoryGauge(card, valueElement, meterElement, memory, unavailableTex
 }
 
 function setMemoryStatus(memory, computeDevice = "cpu") {
-  const isCpu = computeDevice === "cpu";
-  memoryLabel.textContent = isCpu ? "App RAM" : "GPU Memory";
+  const isCuda = computeDevice === "cuda";
+  const isMlx = computeDevice === "mlx";
+  memoryLabel.textContent = isCuda ? "GPU Memory" : isMlx ? "Unified Memory" : "App RAM";
   setMemoryGauge(
     gpuMemoryCard,
     gpuMemoryValue,
     gpuMemoryMeter,
     memory,
-    isCpu ? "RAM unavailable" : "GPU unavailable",
+    isCuda ? "GPU unavailable" : "RAM unavailable",
   );
 }
 
@@ -128,7 +132,7 @@ function setFormDisabled(disabled) {
     element.disabled = disabled;
   }
   for (const element of form.querySelectorAll("input[name='mode'], input[name='inputBehavior']")) {
-    element.disabled = disabled;
+    element.disabled = disabled || (element.value === "hold" && hostPlatform !== "win32");
   }
   hotkeyButton.disabled = disabled;
   recordHotkeyButton.disabled = disabled;
@@ -150,13 +154,13 @@ function setSelectedMode(mode) {
 }
 
 function setSelectedInputBehavior(inputBehavior) {
-  const value = inputBehavior === "hold" ? "hold" : "toggle";
+  const value = inputBehavior === "hold" && hostPlatform === "win32" ? "hold" : "toggle";
   document.getElementById(`behavior-${value}`).checked = true;
 }
 
 function displayHotkey(accelerator) {
   return String(accelerator || "")
-    .replaceAll("CommandOrControl", "Ctrl")
+    .replaceAll("CommandOrControl", hostPlatform === "darwin" ? "Cmd" : "Ctrl")
     .replaceAll("Command", "Cmd")
     .replaceAll("+", " + ");
 }
@@ -187,76 +191,6 @@ function isSafeAccelerator(accelerator) {
 function setRecordedHotkey(accelerator) {
   recordedHotkey = accelerator;
   hotkeyValue.textContent = displayHotkey(accelerator) || "No shortcut set";
-}
-
-function keyFromEvent(event) {
-  const key = event.key;
-  const code = event.code;
-
-  if (["Control", "Shift", "Alt", "Meta"].includes(key)) {
-    return "";
-  }
-  if (/^Key[A-Z]$/.test(code)) {
-    return code.slice(3);
-  }
-  if (/^Digit[0-9]$/.test(code)) {
-    return code.slice(5);
-  }
-  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) {
-    return code;
-  }
-
-  const namedKeys = {
-    Space: "Space",
-    Tab: "Tab",
-    Enter: "Enter",
-    Escape: "Esc",
-    Backspace: "Backspace",
-    Delete: "Delete",
-    Insert: "Insert",
-    Home: "Home",
-    End: "End",
-    PageUp: "PageUp",
-    PageDown: "PageDown",
-    ArrowUp: "Up",
-    ArrowDown: "Down",
-    ArrowLeft: "Left",
-    ArrowRight: "Right",
-    Backquote: "`",
-    Minus: "-",
-    Equal: "=",
-    BracketLeft: "[",
-    BracketRight: "]",
-    Backslash: "\\",
-    Semicolon: ";",
-    Quote: "'",
-    Comma: ",",
-    Period: ".",
-    Slash: "/",
-  };
-
-  return namedKeys[code] || (key.length === 1 ? key.toUpperCase() : "");
-}
-
-function acceleratorFromEvent(event) {
-  const parts = [];
-  if (event.ctrlKey || event.metaKey) {
-    parts.push("CommandOrControl");
-  }
-  if (event.altKey) {
-    parts.push("Alt");
-  }
-  if (event.shiftKey) {
-    parts.push("Shift");
-  }
-
-  const key = keyFromEvent(event);
-  if (!key) {
-    return "";
-  }
-
-  parts.push(key);
-  return parts.join("+");
 }
 
 function readFormConfig() {
@@ -453,8 +387,10 @@ async function loadDevices(selectedDeviceId) {
 }
 
 async function refreshAppStatus() {
+  const generation = ++appStatusGeneration;
   try {
     const status = await window.openflow.getAppStatus();
+    if (generation !== appStatusGeneration) return;
     setState(
       recordingState,
       status.isRecording
@@ -468,7 +404,10 @@ async function refreshAppStatus() {
     );
 
     if (status.worker?.worker === "ready") {
-      setState(backendState, status.workerStatus.message || "Running", "ok");
+      const backend = status.activeBackend
+        ? `${String(status.activeBackend).toUpperCase()} worker`
+        : status.workerStatus.message || "Running";
+      setState(backendState, backend, "ok");
       const modelReady = status.worker.model === "ready";
       const modelUnavailable = status.worker.model === "unavailable";
       setState(
@@ -486,8 +425,9 @@ async function refreshAppStatus() {
     }
 
     setLlmStatus(status.llm);
-    setMemoryStatus(status.resourceMemory, status.computeDevice);
+    setMemoryStatus(status.resourceMemory, status.activeBackend || status.computeDevice);
   } catch {
+    if (generation !== appStatusGeneration) return;
     setState(backendState, "Unknown", "error");
     setState(modelState, "Unknown", "error");
     setState(llmState, "Unknown", "error");
@@ -500,6 +440,13 @@ async function loadSettings() {
   setMessage("Loading");
   try {
     const response = await window.openflow.getConfig();
+    hostPlatform = response.platform || "";
+    const holdOption = document.getElementById("behavior-hold");
+    holdOption.disabled = hostPlatform !== "win32";
+    holdOption.closest("label")?.classList.toggle("disabled", hostPlatform !== "win32");
+    if (hostPlatform !== "win32") {
+      holdOption.title = "Hold-to-speak is currently available on Windows only";
+    }
     versionMessage.textContent = `Version ${response.appVersion || "0.1.0"}`;
     writeFormConfig(response.config, true);
     await loadDevices(response.config.selectedInputDeviceId);
@@ -520,7 +467,7 @@ function setHotkeyCaptureControlsDisabled(disabled) {
     element.disabled = disabled;
   }
   for (const element of form.querySelectorAll("input[name='mode'], input[name='inputBehavior']")) {
-    element.disabled = disabled;
+    element.disabled = disabled || (element.value === "hold" && hostPlatform !== "win32");
   }
   testMicButton.disabled = disabled;
   advancedSettingsButton.disabled = disabled;
@@ -682,7 +629,7 @@ window.addEventListener("keydown", async (event) => {
     return;
   }
 
-  const accelerator = acceleratorFromEvent(event);
+  const accelerator = acceleratorFromEvent(event, hostPlatform);
   if (accelerator) {
     await handleCapturedHotkey(accelerator);
   }

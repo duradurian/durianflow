@@ -8,7 +8,7 @@
     <style>
       :root {
         color-scheme: light dark;
-        font-family: "Segoe UI", system-ui, sans-serif;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
         --bg: #f3f6fa;
         --surface: #ffffff;
         --surface-muted: #f8fafc;
@@ -296,7 +296,7 @@
       <header>
         <div>
           <h1>Advanced Settings</h1>
-          <div class="subtitle">Writing assistance configuration.</div>
+          <div class="subtitle">Speech inference and writing assistance.</div>
         </div>
       </header>
 
@@ -307,10 +307,12 @@
             <label>
               Compute device
               <select id="computeDevice" name="computeDevice">
-                <option value="cpu">CPU</option>
+                <option value="auto">Automatic (recommended)</option>
+                <option value="mlx">Apple MLX (Metal)</option>
                 <option value="cuda">NVIDIA GPU (CUDA)</option>
+                <option value="cpu">CPU</option>
               </select>
-              <span class="helper">Changing devices fully replaces the local speech worker. CPU uses RAM with int8 inference; CUDA uses GPU VRAM and never falls back to CPU.</span>
+              <span class="helper">Automatic prefers MLX on Apple Silicon, then CUDA, then CPU. MLX uses Metal and unified memory; CUDA uses GPU VRAM; CPU uses int8 inference.</span>
             </label>
             <div class="grid">
               <label>

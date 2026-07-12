@@ -1,5 +1,5 @@
 const DEFAULT_ADVANCED = {
-  computeDevice: "cpu",
+  computeDevice: "auto",
   fastVoiceModel: "large-v3-turbo",
   accurateVoiceModel: "large-v3-turbo",
   llmEnabled: false,
@@ -53,11 +53,40 @@ const ADVANCED_CONFIG_KEYS = Object.keys(fields);
 let currentConfig = null;
 let savedSnapshot = "";
 let isSaving = false;
+let formDisabled = false;
 let formRevision = 0;
 let speechModelStatus = null;
 let speechModelOperation = false;
 let speechModelStatusGeneration = 0;
 let ollamaModelsGeneration = 0;
+let appStatusGeneration = 0;
+let runtimeInfo = { platform: "", architecture: "", capabilities: [] };
+let runtimeActiveBackend = null;
+let runtimeActiveModel = null;
+let runtimeWorkerReady = false;
+
+function configureComputeOptions() {
+  const byName = new Map(
+    (runtimeInfo.capabilities || []).map((capability) => [capability.name, capability]),
+  );
+  for (const option of fields.computeDevice.options) {
+    if (option.value === "auto") {
+      option.disabled = false;
+      option.title = "Selects the fastest available backend";
+      continue;
+    }
+    let capability = byName.get(option.value);
+    if (!capability && !byName.size) {
+      const likelyMlx = runtimeInfo.platform === "darwin" && runtimeInfo.architecture === "arm64";
+      capability = {
+        available: option.value === "cpu" || (option.value === "mlx" && likelyMlx),
+        reason: "Start the speech worker to refresh hardware availability.",
+      };
+    }
+    option.disabled = capability ? !capability.available : false;
+    option.title = capability?.reason || "Available";
+  }
+}
 
 function setMessage(message, type = "") {
   formMessage.textContent = message;
@@ -65,6 +94,7 @@ function setMessage(message, type = "") {
 }
 
 function setFormDisabled(disabled) {
+  formDisabled = disabled;
   for (const element of Object.values(fields)) {
     element.disabled = disabled;
   }
@@ -96,15 +126,17 @@ function formatDuration(value) {
 }
 
 function setSpeechModelControlsDisabled(disabled) {
+  const controlsDisabled = disabled || formDisabled;
   const installed = Boolean(speechModelStatus?.installed);
   const canDelete = Boolean(speechModelStatus?.canDelete);
   const hasUnsavedChanges = Boolean(currentConfig && isDirty());
-  downloadSpeechModelButton.disabled = disabled || installed || hasUnsavedChanges;
-  deleteSpeechModelButton.disabled = disabled || !canDelete || hasUnsavedChanges;
-  refreshSpeechModelButton.disabled = disabled;
-  speechModelProfile.disabled = disabled;
-  fields.fastVoiceModel.disabled = disabled;
-  fields.accurateVoiceModel.disabled = disabled;
+  downloadSpeechModelButton.disabled = controlsDisabled || installed || hasUnsavedChanges;
+  deleteSpeechModelButton.disabled = controlsDisabled || !canDelete || hasUnsavedChanges;
+  refreshSpeechModelButton.disabled = controlsDisabled;
+  speechModelProfile.disabled = controlsDisabled;
+  fields.computeDevice.disabled = controlsDisabled;
+  fields.fastVoiceModel.disabled = controlsDisabled;
+  fields.accurateVoiceModel.disabled = controlsDisabled;
 }
 
 function selectedSpeechModel() {
@@ -113,9 +145,28 @@ function selectedSpeechModel() {
     : fields.fastVoiceModel.value;
 }
 
+function resetSpeechModelStatus(message = "Checking model status…") {
+  speechModelStatusGeneration += 1;
+  speechModelStatus = null;
+  speechModelSummary.textContent = message;
+  speechModelSummary.className = "helper";
+  speechModelName.textContent = selectedSpeechModel() || "Configured model";
+  speechModelSize.textContent = "Unknown";
+  speechModelFree.textContent = "Unknown";
+  speechModelLocation.textContent = "";
+  speechModelProgress.removeAttribute("value");
+  speechModelProgressText.textContent = "";
+  setSpeechModelControlsDisabled(speechModelOperation);
+}
+
 function renderSpeechModelStatus(status) {
   if (!status || typeof status !== "object") return;
-  speechModelStatus = { ...speechModelStatus, ...status };
+  const backendChanged = Boolean(
+    speechModelStatus?.backend
+    && status.backend
+    && speechModelStatus.backend !== status.backend,
+  );
+  speechModelStatus = { ...(backendChanged ? null : speechModelStatus), ...status };
   const current = speechModelStatus;
   speechModelName.textContent = current.model || "Configured model";
   speechModelSize.textContent = current.installed
@@ -159,6 +210,21 @@ async function refreshSpeechModelStatus(options = {}) {
   try {
     const status = await window.openflow.getSpeechModelStatus(model);
     if (generation === speechModelStatusGeneration && model === selectedSpeechModel()) {
+      const targetsReadyAutomaticWorker = (
+        currentConfig?.computeDevice === "auto"
+        && runtimeWorkerReady
+        && runtimeActiveModel === model
+        && runtimeActiveBackend
+      );
+      if (
+        targetsReadyAutomaticWorker
+        && status?.backend
+        && status.backend !== runtimeActiveBackend
+      ) {
+        resetSpeechModelStatus();
+        refreshSpeechModelStatus({ silent: true });
+        return;
+      }
       renderSpeechModelStatus(status);
     }
   } catch (error) {
@@ -173,6 +239,7 @@ async function downloadSpeechModel() {
     setMessage("Save changes before downloading a speech model.", "error");
     return;
   }
+  speechModelStatusGeneration += 1;
   speechModelOperation = true;
   setSpeechModelControlsDisabled(true);
   renderSpeechModelStatus({ type: "started", message: "Starting model download", downloadedBytes: 0 });
@@ -196,6 +263,7 @@ async function deleteSpeechModel() {
   if (!window.confirm(`Delete ${speechModelStatus.model || "the speech model"}? You will need to download it again before dictation can use it.`)) {
     return;
   }
+  speechModelStatusGeneration += 1;
   speechModelOperation = true;
   setSpeechModelControlsDisabled(true);
   renderSpeechModelStatus({ type: "started", message: "Deleting model download" });
@@ -289,6 +357,11 @@ async function savePendingChanges() {
   }
 
   const configToSave = readAdvancedConfig();
+  const speechConfigChanged = (
+    configToSave.computeDevice !== currentConfig.computeDevice
+    || configToSave.fastVoiceModel !== currentConfig.fastVoiceModel
+    || configToSave.accurateVoiceModel !== currentConfig.accurateVoiceModel
+  );
   const submittedRevision = formRevision;
   let saveCompleted = false;
   isSaving = true;
@@ -313,6 +386,14 @@ async function savePendingChanges() {
     isSaving = false;
     if (saveCompleted) {
       updateDirtyState();
+      if (speechConfigChanged) {
+        if (isDirty()) {
+          resetSpeechModelStatus("Save backend change to check model status.");
+        } else {
+          resetSpeechModelStatus();
+          refreshSpeechModelStatus({ silent: true });
+        }
+      }
     }
   }
 }
@@ -355,7 +436,7 @@ function setOllamaModelOptions(models, selectedModel = "") {
 }
 
 function writeFormConfig(config, markSaved = false) {
-  currentConfig = config;
+  if (markSaved || !currentConfig) currentConfig = config;
   fields.computeDevice.value = config.computeDevice || DEFAULT_ADVANCED.computeDevice;
   fields.fastVoiceModel.value = config.fastVoiceModel || DEFAULT_ADVANCED.fastVoiceModel;
   fields.accurateVoiceModel.value = config.accurateVoiceModel || DEFAULT_ADVANCED.accurateVoiceModel;
@@ -382,6 +463,21 @@ async function loadSettings() {
   setMessage("Loading");
   try {
     const response = await window.openflow.getConfig();
+    const appStatus = await window.openflow.getAppStatus().catch(() => null);
+    runtimeInfo = {
+      platform: response.platform || appStatus?.platform || "",
+      architecture: response.architecture || "",
+      capabilities: appStatus?.backendCapabilities?.length
+        ? appStatus.backendCapabilities
+        : response.backendCapabilities || [],
+    };
+    runtimeActiveBackend = appStatus?.activeBackend || null;
+    runtimeActiveModel = appStatus?.activeVoiceModel || null;
+    runtimeWorkerReady = Boolean(
+      appStatus?.worker?.worker === "ready"
+      && appStatus?.worker?.model === "ready",
+    );
+    configureComputeOptions();
     versionMessage.textContent = `Version ${response.appVersion || "0.1.0"}`;
     writeFormConfig(response.config, true);
 
@@ -429,6 +525,10 @@ async function refreshOllamaModels(options = {}) {
 form.addEventListener("input", () => noteFormChange());
 form.addEventListener("change", () => noteFormChange());
 
+fields.computeDevice.addEventListener("change", () => {
+  resetSpeechModelStatus("Save backend change to check model status.");
+});
+
 fields.llmProvider.addEventListener("change", () => {
   syncLlmProviderFields();
   if (fields.llmProvider.value === "ollama") {
@@ -441,24 +541,25 @@ refreshSpeechModelButton.addEventListener("click", () => refreshSpeechModelStatu
 downloadSpeechModelButton.addEventListener("click", downloadSpeechModel);
 deleteSpeechModelButton.addEventListener("click", deleteSpeechModel);
 speechModelProfile.addEventListener("change", () => {
-  speechModelStatus = null;
+  resetSpeechModelStatus();
   refreshSpeechModelStatus();
 });
 fields.fastVoiceModel.addEventListener("change", () => {
   if (speechModelProfile.value === "fast") {
-    speechModelStatus = null;
+    resetSpeechModelStatus();
     refreshSpeechModelStatus({ silent: true });
   }
 });
 fields.accurateVoiceModel.addEventListener("change", () => {
   if (speechModelProfile.value === "accurate") {
-    speechModelStatus = null;
+    resetSpeechModelStatus();
     refreshSpeechModelStatus({ silent: true });
   }
 });
 
 resetAdvancedButton.addEventListener("click", () => {
   writeFormConfig({ ...currentConfig, ...DEFAULT_ADVANCED });
+  resetSpeechModelStatus("Save changes to check model status.");
   noteFormChange();
 });
 
@@ -469,7 +570,70 @@ form.addEventListener("submit", (event) => {
 
 window.openflow.onConfigUpdated((nextConfig) => {
   if (!isSaving && !isDirty()) {
+    const speechConfigChanged = Boolean(
+      currentConfig
+      && (
+        currentConfig.computeDevice !== nextConfig.computeDevice
+        || currentConfig.fastVoiceModel !== nextConfig.fastVoiceModel
+        || currentConfig.accurateVoiceModel !== nextConfig.accurateVoiceModel
+      ),
+    );
     writeFormConfig(nextConfig, true);
+    if (speechConfigChanged) {
+      resetSpeechModelStatus();
+      refreshSpeechModelStatus({ silent: true });
+    }
+  }
+});
+
+window.openflow.onAppStatusUpdated(async () => {
+  const generation = ++appStatusGeneration;
+  const status = await window.openflow.getAppStatus().catch(() => null);
+  if (!status || generation !== appStatusGeneration) return;
+  const previousBackend = runtimeActiveBackend;
+  const previousModel = runtimeActiveModel;
+  const previousReady = runtimeWorkerReady;
+  runtimeActiveBackend = status.activeBackend || null;
+  runtimeActiveModel = status.activeVoiceModel || null;
+  runtimeWorkerReady = Boolean(
+    status.worker?.worker === "ready"
+    && status.worker?.model === "ready",
+  );
+  runtimeInfo = {
+    ...runtimeInfo,
+    platform: status.platform || runtimeInfo.platform,
+    capabilities: Array.isArray(status.backendCapabilities)
+      ? status.backendCapabilities
+      : runtimeInfo.capabilities,
+  };
+  configureComputeOptions();
+
+  const targetsReadyAutomaticWorker = Boolean(
+    currentConfig?.computeDevice === "auto"
+    && runtimeWorkerReady
+    && runtimeActiveModel === selectedSpeechModel()
+    && runtimeActiveBackend,
+  );
+  const resolvedWorkerChanged = Boolean(
+    targetsReadyAutomaticWorker
+    && (
+      !previousReady
+      || previousBackend !== runtimeActiveBackend
+      || previousModel !== runtimeActiveModel
+    ),
+  );
+  const displayedBackendChanged = Boolean(
+    targetsReadyAutomaticWorker
+    && speechModelStatus?.backend
+    && runtimeActiveBackend !== speechModelStatus.backend,
+  );
+  if (
+    (resolvedWorkerChanged || displayedBackendChanged)
+    && !isDirty()
+    && !speechModelOperation
+  ) {
+    resetSpeechModelStatus();
+    refreshSpeechModelStatus({ silent: true });
   }
 });
 

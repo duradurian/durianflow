@@ -16,8 +16,10 @@ class Settings(BaseSettings):
     MODEL_PATH: str | None = None
     ALLOW_MODEL_DOWNLOAD: bool = True
     FALLBACK_TO_CPU_ON_CUDA_ERROR: bool = True
-    DEVICE: Literal["auto", "cpu", "cuda"] = "cuda"
-    COMPUTE_TYPE: str = Field(default="float16", min_length=1)
+    DEVICE: Literal["auto", "mlx", "cpu", "cuda"] = "auto"
+    DISABLED_BACKENDS: str = Field(default="", max_length=64)
+    COMPUTE_TYPE: str = Field(default="auto", min_length=1)
+    MLX_MODEL_PATH: str | None = None
     LANGUAGE: str = "en"
     SAMPLE_RATE: int = Field(default=16000, ge=16000, le=16000)
     CHANNELS: int = Field(default=1, ge=1, le=1)

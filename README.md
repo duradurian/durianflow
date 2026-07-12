@@ -1,74 +1,56 @@
 # Durianflow
 
-Note: I built this as a side project because Windows' stock dictation did not fit my workflow and I did not want a paid transcription service. The first version took about two hours; the repository has since focused on making the local dictation path more reliable and secure.
+Durianflow is a private, local dictation app for macOS and Windows. An Electron tray client captures microphone audio and streams it to a supervised Python worker; speech recognition stays on the computer.
 
+The worker automatically chooses the best available inference backend:
 
-Durianflow is a local Windows dictation app that turns speech into text in any focused textbox. It combines an Electron tray client with a supervised local Python transcription worker powered by `faster-whisper` and CTranslate2.
+1. **Apple MLX + Metal** on supported Apple Silicon Macs.
+2. **NVIDIA CUDA** when CTranslate2 detects a compatible GPU.
+3. **CPU int8** everywhere `faster-whisper` is available.
 
-Durianflow does not use the hosted OpenAI API for speech recognition. Transcription runs in the supervised Python worker on your machine. Optional text refinement supports local llama.cpp and Ollama services, or an explicitly enabled compatible remote endpoint. I personally haven't tested refinement beyond Ollama and Unsloth. A custom model for each dictation mode may improve formatting quality, but that still needs benchmarking.
+The backend can also be pinned to MLX, CUDA, or CPU in Advanced Settings. Explicit choices fail with an actionable status when unavailable; Automatic mode is allowed to fall through to the next usable engine.
 
 ## Features
 
-- Global hotkey dictation with toggle or hold-to-speak behavior.
-- Automatic paste into the focused Windows app.
-- Local `faster-whisper` transcription through a supervised stdio worker.
-- Tray settings for hotkey, microphone, language, fast or accurate mode, paste behavior, and backend status.
-- Optional local writing assistance through `llama.cpp` or Ollama.
-- CPU mode for broad compatibility and CUDA mode for NVIDIA GPU acceleration.
-
-## Repository Layout
-
-```text
-backend/              Worker, transcription sessions, VAD, model loading, and tests
-backend/scripts/      Worker, file transcription, model installation, and benchmark utilities
-desktop/              Electron tray app for Windows dictation and paste automation
-docs/                 Architecture, setup, GPU, and troubleshooting notes
-protocol.md           Local worker framing and PCM audio contract
-```
+- Global hotkey dictation with toggle behavior on macOS and Windows.
+- Focus-validated paste into the original macOS or Windows application.
+- Native Apple Silicon inference through `mlx-whisper` and Metal.
+- CUDA and CPU inference through `faster-whisper` and CTranslate2.
+- Engine-specific, managed model downloads; incompatible MLX and CTranslate2 weights never share a slot.
+- Tray settings for microphone, language, fast/accurate model profiles, paste behavior, and live backend status.
+- Optional local writing assistance through llama.cpp or Ollama.
+- No hosted speech-recognition API.
 
 ## Requirements
 
-- Windows 10 or newer for the desktop app.
-- Python 3.11 for the backend.
-- Node.js and npm for the Electron client.
+- Python 3.11 or newer and Node.js 22.12+/npm for the current Electron toolchain.
+- macOS 14+ on Apple Silicon for MLX/Metal.
+- Windows 10+ for the Windows desktop path.
 - A working microphone.
-- Optional: NVIDIA GPU with CUDA/cuDNN for GPU inference.
+- Optional: NVIDIA GPU plus CUDA/cuDNN for CUDA inference.
 
-## Quick Start
+MLX must run under a native arm64 Python process, not an x86 Python process under Rosetta.
 
-Complete the one-time [Worker Setup](#worker-setup) first. The Electron app starts the configured Python worker automatically, but it does not create the virtual environment or install Python dependencies.
+## Quick start
 
-```powershell
-cd desktop
+### macOS / Linux shell
+
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+cp .env.example .env
+
+cd ../desktop
 npm install
 npm start
 ```
 
-Then:
+On Apple Silicon, `requirements.txt` installs `mlx-whisper` automatically. The default `DEVICE=auto` selects MLX when Metal is usable, otherwise CUDA, otherwise CPU. The selected model is downloaded on first use unless downloads are disabled.
 
-1. Focus a textbox in any Windows application.
-2. Press `Ctrl+Alt+Space`.
-3. Speak.
-4. Press `Ctrl+Alt+Space` again, or release it if hold mode is enabled.
-5. Durianflow pastes the finalized transcript into the focused textbox.
-
-Before the first transcription, Durianflow can download and cache the configured Whisper model automatically. To preinstall it explicitly:
-
-```powershell
-cd backend
-python scripts/install_model.py large-v3-turbo
-```
-
-If `ALLOW_MODEL_DOWNLOAD=false` is set and the model is missing, the worker emits an unavailable model state and the desktop status view reports the setup error instead of downloading.
-
-If PowerShell blocks `npm.ps1`, use the command shim:
-
-```powershell
-npm.cmd install
-npm.cmd start
-```
-
-## Worker Setup
+### Windows PowerShell
 
 ```powershell
 cd backend
@@ -77,121 +59,103 @@ python -m venv .venv
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
-python scripts/install_model.py large-v3-turbo
-```
 
-The Electron app starts the worker itself. To exercise the worker protocol directly during backend development, run `python scripts/run_worker.py` and stop it before launching Electron.
-
-The desktop app defaults to **CPU** under **Advanced Settings > Speech Model**. The desktop launcher owns the model, device, and compute-type settings for its worker.
-
-When running `scripts/run_worker.py` or the backend utilities directly, configure CPU mode in `backend/.env`:
-
-```env
-DEVICE=cpu
-COMPUTE_TYPE=int8
-```
-
-For native Windows GPU inference, install the CUDA/cuDNN dependencies described in [docs/nvidia-gpu.md](docs/nvidia-gpu.md), then choose **NVIDIA GPU (CUDA)** in the desktop's Advanced Settings. For a directly launched worker, use:
-
-```env
-DEVICE=cuda
-COMPUTE_TYPE=float16
-```
-
-## Desktop App
-
-Run the desktop client from `desktop/`:
-
-```powershell
-cd desktop
+cd ..\desktop
 npm install
 npm start
 ```
 
-The app includes:
+The desktop resolves `.venv/bin/python` on POSIX and `.venv/Scripts/python.exe` on Windows. `DURIANFLOW_PYTHON` can override the interpreter.
 
-- Tray menu and status window.
-- Main settings for hotkey, input behavior, microphone, language, transcription mode, and paste behavior.
-- Advanced settings for separate fast/accurate faster-whisper model profiles, managed downloads, cleanup, and optional local LLM refinement.
+## macOS permissions
 
-See [desktop/README.md](desktop/README.md) for the full desktop configuration reference.
+Durianflow needs:
 
-## Backend Utilities
+- **Microphone** access to capture speech.
+- **Accessibility** access to send Command-V after revalidating the application and window that were focused when dictation began.
+- **Automation** access to let the paste helper control System Events.
 
-Transcribe an audio file:
+If either paste permission is denied, the transcript remains on the clipboard and the status window shows the relevant System Settings location. See [docs/macos.md](docs/macos.md).
 
-```powershell
-cd backend
-python scripts/transcribe_file.py path\to\audio.wav
-```
+## Backend configuration
 
-Benchmark models:
-
-```powershell
-cd backend
-python scripts/benchmark_models.py
-```
-
-## Configuration
-
-Backend settings are loaded from `backend/.env`. When Electron launches the worker, the selected desktop speech profile overrides `MODEL_NAME`, `DEVICE`, `COMPUTE_TYPE`, and CUDA fallback behavior. Important backend defaults are:
+Desktop settings are authoritative for the worker it launches. Directly launched scripts use `backend/.env`:
 
 ```env
 MODEL_NAME=large-v3-turbo
 MODELS_DIR=./models
 MODEL_PATH=
+MLX_MODEL_PATH=
 ALLOW_MODEL_DOWNLOAD=true
-DEVICE=cuda
-COMPUTE_TYPE=float16
+DEVICE=auto
+COMPUTE_TYPE=auto
 LANGUAGE=en
-SAMPLE_RATE=16000
-CHANNELS=1
-PARTIAL_INTERVAL_MS=1000
-ROLLING_WINDOW_SECONDS=6
-MAX_CONCURRENT_TRANSCRIPTIONS=1
 ```
 
-For fully offline startup, preinstall a model with `scripts/install_model.py` and set `ALLOW_MODEL_DOWNLOAD=false`.
+Supported `DEVICE` values are `auto`, `mlx`, `cuda`, and `cpu`. Automatic selection uses MLX → CUDA → CPU priority. MLX uses float16 Metal inference, CUDA uses float16, and CPU uses int8 by default.
 
-## Local LLM Refinement
+To preinstall the best model format for the current machine:
 
-The desktop app can optionally refine finalized transcripts before paste using a local `llama.cpp` OpenAI-compatible chat completions endpoint or an Ollama server.
+```bash
+cd backend
+python scripts/install_model.py large-v3-turbo --backend auto
+```
 
-Supported refinement modes are:
+Or select a format explicitly:
 
-- `grammar`: clean up grammar and punctuation.
-- `format`: format dictated text for readability.
-- `enhance`: lightly improve phrasing.
+```bash
+python scripts/install_model.py large-v3-turbo --backend mlx
+python scripts/install_model.py large-v3-turbo --backend cuda
+python scripts/install_model.py large-v3-turbo --backend cpu
+```
 
-If the LLM server is unavailable or too slow, Durianflow inserts the original transcript.
+MLX slots use names such as `models/mlx--large-v3-turbo`; CTranslate2 retains its own model layout. See [docs/compute-backends.md](docs/compute-backends.md).
 
-## Development Checks
+## Utilities
 
-Run backend tests:
+```bash
+cd backend
+python scripts/transcribe_file.py path/to/audio.wav --backend auto
+python scripts/benchmark_models.py --backend auto
+python scripts/manage_model.py status --model large-v3-turbo --backend auto --json
+python scripts/detect_backends.py
+```
 
-```powershell
+## Repository layout
+
+```text
+backend/app/          Runtime selection, model adapters, worker, sessions, VAD, and audio
+backend/scripts/      Worker, model management, file transcription, and benchmarks
+backend/tests/        Hardware-independent backend tests
+desktop/src/          Electron main/renderer code and Windows/macOS integration
+desktop/test/         Desktop transport, safety, and platform tests
+docs/                 Architecture, setup, backend, GPU, macOS, and troubleshooting guides
+protocol.md           Local worker framing and PCM contract
+```
+
+## Development checks
+
+```bash
 cd backend
 pytest
-```
 
-Run the desktop JavaScript checks:
-
-```powershell
-cd desktop
+cd ../desktop
 npm run check
 npm test
 ```
 
 ## Documentation
 
-- [docs/local-setup.md](docs/local-setup.md): local backend and desktop setup.
-- [docs/architecture.md](docs/architecture.md): backend and desktop flow diagrams.
-- [docs/nvidia-gpu.md](docs/nvidia-gpu.md): NVIDIA GPU setup and CUDA troubleshooting.
-- [docs/troubleshooting.md](docs/troubleshooting.md): common startup, model, latency, and transcription issues.
+- [Local setup](docs/local-setup.md)
+- [Compute backends](docs/compute-backends.md)
+- [macOS integration](docs/macos.md)
+- [NVIDIA GPU setup](docs/nvidia-gpu.md)
+- [Architecture](docs/architecture.md)
+- [Troubleshooting](docs/troubleshooting.md)
 
-## Known Limitations
+## Known limitations
 
-- Whisper is not true token streaming; Durianflow uses rolling-window re-transcription for partial results.
-- VAD is energy-based and intentionally simple.
-- Clients are responsible for microphone capture, resampling, and valid PCM frames.
-- GPU concurrency defaults to one transcription at a time.
+- Whisper is not true token streaming; the hidden desktop recorder performs final utterance transcription for the shortest stop-to-paste path.
+- Hold-to-speak key-up monitoring remains Windows-only; toggle mode is cross-platform.
+- Linux uses the same worker and Electron capture path, but automatic cross-application paste is currently clipboard-only.
+- A distributable app still needs an architecture-matched Python runtime and dependencies included beside the Electron resources; source development uses `backend/.venv`.

@@ -2,36 +2,54 @@
 
 ## Speech worker does not start
 
-The default desktop path needs a Python environment at `backend/.venv/Scripts/python.exe`. Recreate it from [local-setup.md](local-setup.md), or set `DURIANFLOW_PYTHON` to a working Python interpreter (`OPENFLOW_PYTHON` is also accepted for compatibility). The desktop status window reports worker/model startup failures.
+Create `backend/.venv` from [local-setup.md](local-setup.md). On macOS/Linux the launcher expects `.venv/bin/python`; on Windows it expects `.venv/Scripts/python.exe`. Set `DURIANFLOW_PYTHON` when using another interpreter.
+
+## MLX is unavailable on a Mac
+
+MLX requires Apple Silicon, macOS 14+, and a native arm64 Python. Check:
+
+```bash
+python3 -c 'import platform; print(platform.machine())'
+python3 -c 'import mlx.core as mx; print(mx.metal.is_available())'
+```
+
+Recreate the virtualenv after switching away from a Rosetta/x86 Python. Automatic mode will use CPU if MLX is not installed or Metal cannot be opened.
 
 ## Model stays unavailable
 
-Check `backend/.env`, model location, and network access. With downloads disabled, run `python scripts/install_model.py large-v3-turbo` from `backend/` or provide `MODEL_PATH`. The worker reports model state separately from process readiness.
+Model formats are backend-specific. Install the format selected in Advanced Settings:
 
-## Desktop hotkey does not trigger
-
-Another program may own the accelerator. Change the hotkey in Settings; Durianflow applies the replacement immediately and reports if registration fails.
-
-## Transcript does not paste
-
-Durianflow writes the transcript to the clipboard then sends synthetic `Ctrl+V`. Focus a normal editable field before stopping. If the target blocks synthetic paste, disable `autoPaste`; the transcript remains on the clipboard.
-
-## Microphone permission denied
-
-Enable microphone access for desktop apps in Windows Privacy & security settings, then restart Durianflow.
-
-## CUDA is unavailable or a CUDA DLL is missing
-
-For the desktop app, choose **CPU** under **Advanced Settings > Speech Model**.
-For a directly launched worker, use:
-
-```env
-DEVICE=cpu
-COMPUTE_TYPE=int8
+```bash
+python scripts/install_model.py large-v3-turbo --backend mlx
+python scripts/install_model.py large-v3-turbo --backend cpu
 ```
 
-For GPU mode, follow [nvidia-gpu.md](nvidia-gpu.md). `cublas64_12.dll` errors indicate that the CUDA 12 runtime is not available to the worker interpreter.
+With downloads disabled, verify `MODEL_PATH` for CTranslate2 or `MLX_MODEL_PATH` for MLX. An incomplete managed download is removed by desktop startup cleanup.
+
+## macOS transcript is copied but not pasted
+
+Enable the app under **System Settings → Privacy & Security → Accessibility**. Then open **Privacy & Security → Automation** and allow it to control System Events. During source development, macOS may list Terminal, Electron, or `osascript` instead. Durianflow intentionally refuses to paste if the focused process or window changed after dictation began.
+
+## macOS microphone permission denied
+
+Enable Durianflow under **System Settings → Privacy & Security → Microphone**, then restart it.
+
+## Windows transcript is copied but not pasted
+
+Durianflow writes the clipboard before sending Ctrl-V. If PowerShell, focus validation, or the target application rejects synthetic input, the transcript remains copied. Disable Auto paste for clipboard-only operation.
+
+## CUDA is unavailable
+
+Choose Automatic or CPU, or follow [nvidia-gpu.md](nvidia-gpu.md). On Windows, `cublas64_12.dll` errors mean the CUDA 12 runtime is not visible to the worker interpreter.
+
+## Hold-to-speak is unavailable
+
+Hold mode currently uses Windows key-state APIs. Use Toggle mode on macOS and Linux.
 
 ## No transcript or duplicate text
 
-VAD intentionally ignores silence. Speak above `VAD_ENERGY_THRESHOLD` or lower it cautiously. Overlap cleanup reduces repeated phrases, but model rewording can still produce duplicates. For latency, choose a smaller model, `mode=fast`, and GPU inference where available.
+The VAD ignores silence. Speak above `VAD_ENERGY_THRESHOLD` or lower it cautiously. Choose a smaller model for lower latency. Overlap cleanup reduces repeated phrases, but model rewording can still produce duplicates.
+
+## MLX unified-memory error
+
+Close memory-heavy applications or select a smaller model. MLX weights and working buffers share system memory with macOS and the Electron app.

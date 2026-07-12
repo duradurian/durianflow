@@ -6,8 +6,12 @@ from app.config import Settings
 from app.model_store import (
     ModelUnavailableError,
     expected_model_path,
+    expected_mlx_model_path,
+    is_valid_mlx_model_dir,
     is_link_or_junction,
     model_cache_path,
+    mlx_model_repository,
+    resolve_mlx_model_source,
     resolve_model_source,
 )
 
@@ -103,3 +107,38 @@ def test_windows_reparse_attribute_is_treated_as_link() -> None:
             return False
 
     assert is_link_or_junction(ReparsePath()) is True
+
+
+def test_mlx_model_slots_and_repository_mapping_are_backend_qualified(tmp_path: Path) -> None:
+    settings = Settings(
+        _env_file=None,
+        MODELS_DIR=str(tmp_path),
+        MODEL_NAME="large-v3-turbo",
+    )
+
+    assert expected_mlx_model_path(settings).name == "mlx--large-v3-turbo"
+    assert mlx_model_repository(settings.MODEL_NAME) == "mlx-community/whisper-large-v3-turbo"
+    assert expected_mlx_model_path(settings) != expected_model_path(settings)
+
+
+def test_resolve_mlx_model_source_accepts_safetensors(tmp_path: Path) -> None:
+    model = tmp_path / "mlx-model"
+    model.mkdir()
+    (model / "config.json").write_text("{}", encoding="utf-8")
+    (model / "weights.safetensors").write_bytes(b"weights")
+
+    assert is_valid_mlx_model_dir(model)
+    source, local_only = resolve_mlx_model_source(
+        Settings(_env_file=None, DEVICE="mlx", MLX_MODEL_PATH=str(model))
+    )
+    assert source == str(model.resolve())
+    assert local_only is True
+
+
+def test_mlx_validation_rejects_weight_name_unsupported_by_pinned_loader(tmp_path: Path) -> None:
+    model = tmp_path / "mlx-model"
+    model.mkdir()
+    (model / "config.json").write_text("{}", encoding="utf-8")
+    (model / "model.safetensors").write_bytes(b"weights")
+
+    assert is_valid_mlx_model_dir(model) is False

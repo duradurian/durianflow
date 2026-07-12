@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import threading
+import types
 
 from app.config import Settings
 from app.schemas import TranscriptSegment
@@ -260,5 +261,51 @@ def test_cancel_during_session_event_emission_suppresses_remaining_output() -> N
 
         assert any(item["type"] == "canceled" for item in events)
         assert not any(item["type"] == "accepted" and item["sequence"] == 1 for item in events)
+
+    asyncio.run(run())
+
+
+def test_model_state_reports_resolved_backend_and_capabilities() -> None:
+    async def run() -> None:
+        events = []
+
+        class MetadataTranscriber(FakeTranscriber):
+            model_loaded = False
+            requested_backend = "auto"
+            active_backend = "mlx"
+            active_device = "metal"
+            active_compute_type = "float16"
+            available_backends = ["mlx", "cpu"]
+            capabilities = (
+                types.SimpleNamespace(
+                    as_dict=lambda: {
+                        "name": "mlx",
+                        "available": True,
+                        "device": "metal",
+                        "computeType": "float16",
+                        "reason": None,
+                    }
+                ),
+            )
+
+            def load(self):
+                self.model_loaded = True
+
+        async def emit(record):
+            events.append(record)
+
+        worker = TranscriptionWorker(
+            Settings(_env_file=None, DEVICE="auto"),
+            MetadataTranscriber(),
+            emit,
+        )
+        await worker.load_model()
+
+        ready = events[-1]
+        assert ready["state"] == "ready"
+        assert ready["requestedBackend"] == "auto"
+        assert ready["backend"] == "mlx"
+        assert ready["device"] == "metal"
+        assert ready["availableBackends"] == ["mlx", "cpu"]
 
     asyncio.run(run())

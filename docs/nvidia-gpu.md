@@ -1,13 +1,13 @@
 # NVIDIA GPU Setup
 
-Durianflow runs `faster-whisper` in its local Python worker. The Electron desktop
+Durianflow runs `faster-whisper` for its CUDA backend. The Electron desktop
 app launches the worker from `backend/.venv/Scripts/python.exe` during
 development, so CUDA DLLs must be visible to that interpreter.
 
 Install a CUDA 12.x runtime and a compatible cuDNN release, then choose
 **NVIDIA GPU (CUDA)** under **Advanced Settings > Speech Model**. The desktop
-uses CUDA float16 and intentionally surfaces GPU failures instead of retaining
-a second CPU copy of the model.
+uses CUDA float16. Explicit CUDA selection surfaces failures; Automatic mode
+can continue to CPU when CUDA initialization fails.
 
 For a directly launched Python worker, configure `backend/.env`:
 
@@ -28,3 +28,5 @@ directly launched worker, use:
 DEVICE=cpu
 COMPUTE_TYPE=int8
 ```
+
+Selecting **Automatic** probes MLX first on Apple Silicon, then CUDA, then CPU.

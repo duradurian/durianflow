@@ -10,7 +10,7 @@ from typing import Any, Awaitable, BinaryIO, Callable
 
 from app.config import Settings, get_settings
 from app.session import TranscriptionSession, TranscriberProtocol
-from app.transcriber import WhisperTranscriber
+from app.transcriber import create_transcriber
 from app.worker_protocol import ProtocolError, event, read_record, validate_command, write_record
 
 logger = logging.getLogger(__name__)
@@ -53,23 +53,54 @@ class TranscriptionWorker:
         self._scheduled_audio_bytes = 0
         self._audio_processing_lock = asyncio.Lock()
 
+    def _model_fields(self) -> dict[str, Any]:
+        capabilities = getattr(self.transcriber, "capabilities", ())
+        return {
+            "requestedBackend": getattr(
+                self.transcriber,
+                "requested_backend",
+                self.settings.DEVICE,
+            ),
+            "backend": getattr(self.transcriber, "active_backend", self.settings.DEVICE),
+            "device": getattr(self.transcriber, "active_device", self.settings.DEVICE),
+            "computeType": getattr(
+                self.transcriber,
+                "active_compute_type",
+                self.settings.COMPUTE_TYPE,
+            ),
+            "availableBackends": list(
+                getattr(self.transcriber, "available_backends", [])
+            ),
+            "capabilities": [
+                capability.as_dict() if hasattr(capability, "as_dict") else capability
+                for capability in capabilities
+            ],
+        }
+
     async def load_model(self) -> None:
         while not self._shutdown:
             self.model_state = "loading"
-            await self.emit(event("model_state", state="loading"))
+            await self.emit(event("model_state", state="loading", **self._model_fields()))
             try:
                 await asyncio.to_thread(self.transcriber.load)  # type: ignore[attr-defined]
             except Exception as exc:
                 self.model_state = "unavailable"
                 logger.exception("Worker model load failed")
-                await self.emit(event("model_state", state="unavailable", message=str(exc)))
+                await self.emit(
+                    event(
+                        "model_state",
+                        state="unavailable",
+                        message=str(exc),
+                        **self._model_fields(),
+                    )
+                )
                 retry_delay = self.settings.MODEL_LOAD_RETRY_SECONDS
                 if retry_delay <= 0:
                     return
                 await asyncio.sleep(retry_delay)
             else:
                 self.model_state = "ready"
-                await self.emit(event("model_state", state="ready"))
+                await self.emit(event("model_state", state="ready", **self._model_fields()))
                 return
 
     async def handle(
@@ -86,7 +117,13 @@ class TranscriptionWorker:
             return
         command_type = command["type"]
         if command_type == "hello":
-            await self.emit(event("worker_ready", modelState=self.model_state))
+            await self.emit(
+                event(
+                    "worker_ready",
+                    modelState=self.model_state,
+                    **self._model_fields(),
+                )
+            )
         elif command_type == "start":
             await self._start(command)
         elif command_type == "audio":
@@ -208,8 +245,14 @@ class TranscriptionWorker:
                               sequence=command["sequence"], acceptedBytes=0,
                               creditBytes=MAX_QUEUED_AUDIO_BYTES))
         await self._emit_session_events([
-            {"type": "ready", "session_id": start.session_id, "model": self.settings.MODEL_NAME,
-             "sample_rate": self.settings.SAMPLE_RATE}, {"type": "status", "status": "listening"}
+            {
+                "type": "ready",
+                "session_id": start.session_id,
+                "model": self.settings.MODEL_NAME,
+                "sample_rate": self.settings.SAMPLE_RATE,
+                **self._model_fields(),
+            },
+            {"type": "status", "status": "listening"},
         ], active)
 
     async def _audio(
@@ -356,9 +399,9 @@ async def run_worker(stdin: BinaryIO = sys.stdin.buffer, stdout: BinaryIO = sys.
             await asyncio.to_thread(write_record, stdout, record)
 
     settings = get_settings()
-    transcriber = WhisperTranscriber(settings)
+    transcriber = create_transcriber(settings)
     worker = TranscriptionWorker(settings, transcriber, emit)
-    await emit(event("worker_ready", modelState="loading"))
+    await emit(event("worker_ready", modelState="loading", **worker._model_fields()))
     load_task = asyncio.create_task(worker.load_model())
     try:
         while not worker._shutdown:

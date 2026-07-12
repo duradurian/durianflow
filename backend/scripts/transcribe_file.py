@@ -11,7 +11,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.audio import ensure_mono  # noqa: E402
 from app.config import get_settings  # noqa: E402
-from app.transcriber import WhisperTranscriber  # noqa: E402
+from app.transcriber import create_transcriber  # noqa: E402
 
 
 def load_audio(path: Path, target_rate: int) -> np.ndarray:
@@ -27,10 +27,13 @@ def main() -> None:
     parser.add_argument("path", type=Path)
     parser.add_argument("--language", default=None)
     parser.add_argument("--mode", choices=["fast", "accurate"], default="fast")
+    parser.add_argument("--backend", choices=["auto", "mlx", "cuda", "cpu"], default=None)
     args = parser.parse_args()
 
     settings = get_settings()
-    transcriber = WhisperTranscriber(settings)
+    if args.backend:
+        settings = settings.model_copy(update={"DEVICE": args.backend})
+    transcriber = create_transcriber(settings)
     audio = load_audio(args.path, settings.SAMPLE_RATE)
     segments = transcriber.transcribe(audio, settings.SAMPLE_RATE, args.language or settings.LANGUAGE, args.mode)
     for segment in segments:

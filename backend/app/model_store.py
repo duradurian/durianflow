@@ -17,6 +17,17 @@ VOCABULARY_FILES = ("vocabulary.json", "vocabulary.txt")
 MODEL_FILE_REQUIREMENTS = (
     "model.bin, config.json, tokenizer.json, and vocabulary.json or vocabulary.txt"
 )
+MLX_WEIGHT_FILES = ("weights.safetensors", "weights.npz")
+MLX_MODEL_FILE_REQUIREMENTS = "config.json and weights.safetensors or weights.npz"
+MLX_MODEL_REPOSITORIES = {
+    "tiny": "mlx-community/whisper-tiny-mlx",
+    "base": "mlx-community/whisper-base-mlx",
+    "small": "mlx-community/whisper-small-mlx",
+    "medium": "mlx-community/whisper-medium-mlx",
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+    "distil-large-v3": "mlx-community/distil-whisper-large-v3",
+}
 
 
 def _resolve_path(value: str) -> Path:
@@ -53,15 +64,26 @@ def remove_managed_path(root: Path, candidate: Path) -> None:
         candidate.unlink()
 
 
-def validate_managed_path(root: Path, candidate: Path) -> tuple[Path, Path]:
-    """Validate a direct managed child without mutating the filesystem."""
+def validate_managed_root(root: Path) -> Path:
+    """Validate a lexical model root without following linked ancestors."""
     root = Path(os.path.abspath(root))
-    candidate = Path(os.path.abspath(candidate))
     forbidden_roots = {Path(root.anchor), Path.home(), BACKEND_ROOT}
     if root in forbidden_roots:
         raise RuntimeError(f"Refusing to use a broad directory for destructive model operations: {root}")
-    if is_link_or_junction(root):
-        raise RuntimeError(f"Refusing to manage models through a linked directory: {root}")
+    for component in (root, *root.parents):
+        if component == Path(component.anchor):
+            continue
+        if is_link_or_junction(component):
+            raise RuntimeError(
+                f"Refusing to manage models through a linked directory component: {component}"
+            )
+    return root
+
+
+def validate_managed_path(root: Path, candidate: Path) -> tuple[Path, Path]:
+    """Validate a direct managed child without mutating the filesystem."""
+    root = validate_managed_root(root)
+    candidate = Path(os.path.abspath(candidate))
     try:
         relative = candidate.relative_to(root)
     except ValueError as exc:
@@ -97,10 +119,32 @@ def is_valid_model_dir(path: Path) -> bool:
     )
 
 
+def is_valid_mlx_model_dir(path: Path) -> bool:
+    def nonempty_file(name: str) -> bool:
+        candidate = path / name
+        try:
+            return candidate.is_file() and candidate.stat().st_size > 0
+        except OSError:
+            return False
+
+    return (
+        path.is_dir()
+        and nonempty_file("config.json")
+        and any(nonempty_file(name) for name in MLX_WEIGHT_FILES)
+    )
+
+
 def expected_model_path(settings: Settings) -> Path:
     if settings.MODEL_PATH:
         return _resolve_path(settings.MODEL_PATH)
     return _resolve_path(str(_resolve_path(settings.MODELS_DIR) / model_dir_name(settings.MODEL_NAME)))
+
+
+def expected_mlx_model_path(settings: Settings) -> Path:
+    if settings.MLX_MODEL_PATH:
+        return _resolve_path(settings.MLX_MODEL_PATH)
+    name = model_dir_name(settings.MODEL_NAME)
+    return _resolve_path(str(_resolve_path(settings.MODELS_DIR) / f"mlx--{name}"))
 
 
 def model_repository(model_name: str) -> str:
@@ -111,6 +155,17 @@ def model_repository(model_name: str) -> str:
         return str(_MODELS.get(model_name, model_name))
     except (ImportError, AttributeError):
         return model_name
+
+
+def mlx_model_repository(model_name: str) -> str:
+    try:
+        return MLX_MODEL_REPOSITORIES[model_name]
+    except KeyError as exc:
+        supported = ", ".join(sorted(MLX_MODEL_REPOSITORIES))
+        raise ModelUnavailableError(
+            f"No verified MLX Whisper checkpoint is configured for {model_name!r}. "
+            f"Choose one of: {supported}."
+        ) from exc
 
 
 def model_cache_path(settings: Settings) -> Path:
@@ -178,3 +233,78 @@ def resolve_model_source(settings: Settings) -> tuple[str, bool]:
         "set MODEL_PATH to an existing faster-whisper model directory, "
         "or set ALLOW_MODEL_DOWNLOAD=true to let faster-whisper download/cache it at startup."
     )
+
+
+def resolve_mlx_model_source(settings: Settings) -> tuple[str, bool]:
+    """Return an MLX model source and whether it is already local."""
+    if settings.MLX_MODEL_PATH:
+        path = _resolve_path(settings.MLX_MODEL_PATH)
+        if is_valid_mlx_model_dir(path):
+            return str(path), True
+        if path.exists():
+            raise ModelUnavailableError(
+                f"Configured MLX_MODEL_PATH exists but is not a complete MLX Whisper model: "
+                f"{path}. Expected {MLX_MODEL_FILE_REQUIREMENTS}."
+            )
+        raise ModelUnavailableError(
+            f"Configured MLX_MODEL_PATH does not exist: {path}. "
+            "Run backend/scripts/install_model.py --backend mlx or update MLX_MODEL_PATH."
+        )
+
+    path = expected_mlx_model_path(settings)
+    if is_valid_mlx_model_dir(path):
+        return str(path), True
+    if path.exists():
+        if settings.ALLOW_MODEL_DOWNLOAD:
+            return mlx_model_repository(settings.MODEL_NAME), False
+        raise ModelUnavailableError(
+            f"Local MLX Whisper model directory is incomplete at {path}. "
+            f"Expected {MLX_MODEL_FILE_REQUIREMENTS}. Re-run install_model.py with --force."
+        )
+    if settings.ALLOW_MODEL_DOWNLOAD:
+        return mlx_model_repository(settings.MODEL_NAME), False
+    raise ModelUnavailableError(
+        f"Local MLX Whisper model was not found at {path}. "
+        f"Run `python scripts/install_model.py {settings.MODEL_NAME} --backend mlx` from backend/, "
+        "set MLX_MODEL_PATH to an existing MLX Whisper model directory, "
+        "or set ALLOW_MODEL_DOWNLOAD=true."
+    )
+
+
+def ensure_mlx_model(settings: Settings) -> str:
+    """Resolve or atomically download the selected MLX model into MODELS_DIR."""
+    source, local_only = resolve_mlx_model_source(settings)
+    if local_only:
+        return source
+
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise ModelUnavailableError(
+            "huggingface-hub is required to download MLX Whisper models."
+        ) from exc
+
+    target = expected_mlx_model_path(settings)
+    root = _resolve_path(settings.MODELS_DIR)
+    temporary = root / f".{target.name}.download"
+    validate_managed_path(root, target)
+    validate_managed_path(root, temporary)
+    root.mkdir(parents=True, exist_ok=True)
+    if temporary.exists() or is_link_or_junction(temporary):
+        remove_managed_path(root, temporary)
+    if target.exists() or is_link_or_junction(target):
+        remove_managed_path(root, target)
+    temporary.mkdir()
+    try:
+        snapshot_download(repo_id=source, local_dir=str(temporary))
+        if not is_valid_mlx_model_dir(temporary):
+            raise ModelUnavailableError(
+                f"Downloaded MLX model at {temporary} is incomplete. "
+                f"Expected {MLX_MODEL_FILE_REQUIREMENTS}."
+            )
+        temporary.replace(target)
+    except Exception:
+        if temporary.exists() or is_link_or_junction(temporary):
+            remove_managed_path(root, temporary)
+        raise
+    return str(target)

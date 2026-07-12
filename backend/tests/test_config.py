@@ -19,3 +19,9 @@ from app.config import Settings
 def test_settings_reject_values_that_break_runtime_invariants(field: str, value: object) -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **{field: value})
+
+
+def test_cross_platform_backend_defaults_to_auto_and_accepts_mlx() -> None:
+    assert Settings(_env_file=None).DEVICE == "auto"
+    assert Settings(_env_file=None).COMPUTE_TYPE == "auto"
+    assert Settings(_env_file=None, DEVICE="mlx").DEVICE == "mlx"
