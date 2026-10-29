@@ -1,12 +1,14 @@
 import types
 
 import numpy as np
+import pytest
 
 from app.config import Settings
 from app.transcriber import MlxWhisperTranscriber
 
 
-def test_mlx_transcriber_loads_once_and_normalizes_segments(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("mode", ["fast", "accurate"])
+def test_mlx_transcriber_loads_once_and_normalizes_segments(monkeypatch, tmp_path, mode) -> None:
     calls = {"load": 0, "transcribe": []}
     selected_devices = []
 
@@ -19,6 +21,8 @@ def test_mlx_transcriber_loads_once_and_normalizes_segments(monkeypatch, tmp_pat
             return object()
 
     def transcribe(audio, **kwargs):
+        if kwargs.get("beam_size") is not None:
+            raise NotImplementedError("Beam search decoder is not yet implemented")
         calls["transcribe"].append((audio.copy(), kwargs))
         return {
             "segments": [
@@ -49,14 +53,14 @@ def test_mlx_transcriber_loads_once_and_normalizes_segments(monkeypatch, tmp_pat
         np.zeros(1600, dtype=np.float32),
         16000,
         "en",
-        "accurate",
+        mode,
     )
 
     assert calls["load"] == 1
     assert selected_devices == ["gpu"]
     assert [segment.text for segment in segments] == ["hello", "world"]
     assert len(calls["transcribe"]) == 2
-    assert calls["transcribe"][-1][1]["beam_size"] == 3
+    assert all(kwargs.get("beam_size") is None for _audio, kwargs in calls["transcribe"])
     assert backend.active_backend == "mlx"
     assert backend.active_device == "metal"
 

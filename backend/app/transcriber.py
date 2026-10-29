@@ -260,11 +260,12 @@ class MlxWhisperTranscriber:
                 # Exercise the public path once so model_state=ready means the
                 # Metal kernels and decoder are usable, not only that weights
                 # could be read from disk.
+                # mlx-whisper requires beam_size to be unset for its greedy
+                # decoder; beam search is unsupported even with beam_size=1.
                 self._transcribe_function(
                     np.zeros(1600, dtype=np.float32),
                     path_or_hf_repo=self.model_source,
                     language=self.settings.LANGUAGE or "en",
-                    beam_size=1,
                     temperature=0,
                     verbose=None,
                     word_timestamps=False,
@@ -304,13 +305,11 @@ class MlxWhisperTranscriber:
             self.load()
         assert self._transcribe_function is not None
 
-        beam_size = 1 if mode == "fast" else 3
         try:
             result = self._transcribe_function(
                 normalized_audio,
                 path_or_hf_repo=self.model_source,
                 language=language,
-                beam_size=beam_size,
                 temperature=0,
                 verbose=None,
                 word_timestamps=False,

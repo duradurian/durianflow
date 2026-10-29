@@ -1,9 +1,27 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 
 const { acceleratorFromEvent } = require("../src/hotkey_capture");
+
+test("settings script starts after loading the browser hotkey helper", () => {
+  const settingsStarted = new Error("Settings initialization started");
+  const context = vm.createContext({
+    window: {},
+    document: { getElementById() { throw settingsStarted; } },
+  });
+  const source = (name) => fs.readFileSync(path.join(__dirname, "../src", name), "utf8");
+
+  vm.runInContext(source("hotkey_capture.js"), context);
+  assert.throws(
+    () => vm.runInContext(source("settings.js"), context),
+    (error) => error === settingsStarted,
+  );
+});
 
 test("preserves physical Command and Control independently on macOS", () => {
   assert.equal(acceleratorFromEvent({

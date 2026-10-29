@@ -18,7 +18,7 @@ const gpuMemoryCard = document.getElementById("gpu-memory-card");
 const memoryLabel = document.getElementById("memory-label");
 const gpuMemoryValue = document.getElementById("gpu-memory-value");
 const gpuMemoryMeter = document.getElementById("gpu-memory-meter");
-const { acceleratorFromEvent } = window.DurianflowHotkeyCapture;
+const { acceleratorFromEvent: captureHotkeyAccelerator } = window.DurianflowHotkeyCapture;
 
 const fields = {
   language: document.getElementById("language"),
@@ -629,7 +629,7 @@ window.addEventListener("keydown", async (event) => {
     return;
   }
 
-  const accelerator = acceleratorFromEvent(event, hostPlatform);
+  const accelerator = captureHotkeyAccelerator(event, hostPlatform);
   if (accelerator) {
     await handleCapturedHotkey(accelerator);
   }
